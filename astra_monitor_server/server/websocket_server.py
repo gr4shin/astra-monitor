@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import os
+import base64
 import websockets
 from PyQt5.QtCore import QObject, pyqtSignal
 
@@ -107,6 +109,27 @@ class WebSocketServer(QObject):
                 self.connection_lost.emit(client_id)
                 return False
         return False
+
+    async def upload_file_to_client(self, client_id, local_path, remote_path):
+        if client_id not in self.clients:
+            return False
+        try:
+            file_size = os.path.getsize(local_path)
+            await self.send_command(client_id, f"upload_file_start:{remote_path}:{file_size}")
+
+            with open(local_path, 'rb') as f:
+                while True:
+                    chunk = f.read(4 * 1024 * 1024) # 4MB chunks
+                    if not chunk:
+                        break
+                    chunk_b64 = base64.b64encode(chunk).decode('ascii')
+                    await self.send_command(client_id, f"upload_file_chunk:{chunk_b64}")
+            
+            await self.send_command(client_id, "upload_file_end")
+            return True
+        except Exception as e:
+            print(f"Error uploading file: {e}")
+            return False
             
     async def client_disconnect(self, client_id):
         if client_id in self.clients:

@@ -10,13 +10,18 @@ import platform
 import sys
 from datetime import datetime
 
-
+if platform.system() == "Linux":
+    import pty
+    import termios
+    import struct
+    import fcntl
 
 from astra_monitor_client.utils.system_utils import get_full_system_info, SystemMonitor
 
 class CommandHandler:
     def __init__(self, client):
         self.client = client
+        self.interactive_session = None
 
     async def handle_command(self, websocket, command):
         """Обработка команд от сервера"""
@@ -170,7 +175,7 @@ class CommandHandler:
 
             elif command.startswith("apt:"):
                 if platform.system() == "Linux":
-                    apt_cmd = command.split(":", 1)[1]                
+                    apt_cmd = command.split(":", 1)[1]
                     logging.info("-> 📦 Выполнение: apt команда '%s'.", apt_cmd.split(':', 1)[0])
                     
                     if apt_cmd == "get_repos":
@@ -216,25 +221,34 @@ class CommandHandler:
                         return None
 
                     elif apt_cmd == "list_upgradable":
-                        proc = await asyncio.create_subprocess_shell("apt list --upgradable", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)                    
-                        stdout, stderr = await proc.communicate()                    
-                        if proc.returncode != 0: return {"apt_command_result": f"❌ Ошибка: {stderr.decode()}"}
+                        proc = await asyncio.create_subprocess_shell("apt list --upgradable", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                        stdout, stderr = await proc.communicate()
+                        if proc.returncode != 0:
+                            return {"apt_command_result": f"❌ Ошибка: {stderr.decode()}"}
                         
                         output = stdout.decode()
                         packages = []
                         lines = output.strip().split('\n')
+                        
+                        # Regex to find "[upgradable from: 1.2.3]"
+                        from_regex = re.compile(r'\[upgradable from:\s*(.*?)\]')
+
                         if len(lines) > 1:
                             for line in lines[1:]: # Skip "Listing..."
                                 parts = line.split()
-                                if len(parts) < 4: continue
+                                if len(parts) < 2: continue
+                                
                                 name = parts[0].split('/')[0]
                                 new_version = parts[1]
-                                current_version = parts[-1].strip('[]') if 'from:' in line else 'N/A'
+                                
+                                current_version_match = from_regex.search(line)
+                                current_version = current_version_match.group(1) if current_version_match else 'N/A'
+                                
                                 packages.append({"name": name, "current": current_version, "new": new_version})
                         return {"apt_upgradable_list": packages}
 
                     elif apt_cmd.startswith("upgrade_packages:"):
-                        packages_str = apt_cmd.split(":", 1)[1]
+                        packages_str = command.split(":", 1)[1]
                         packages = ' '.join(re.findall(r'[\w.\-:]+', packages_str))
                         if packages: asyncio.create_task(self.stream_command_output(websocket, f"sudo apt-get install --only-upgrade -y {packages}"))
                         return None
@@ -245,6 +259,9 @@ class CommandHandler:
                 else:
                     return {"error": "Command not supported on this platform"}
 
+            elif command.startswith("interactive:"):
+                return await self.handle_interactive_command(websocket, command)
+
             elif command.startswith("install_package:"):
                 package_path = command.split(":", 1)[1]
                 logging.info("-> 🚀 Выполнение: запуск установки пакета '%s'.", package_path)
@@ -254,20 +271,20 @@ class CommandHandler:
                     script_content = f"""#!/bin/bash
 # Скрипт самоубновления для клиента мониторинга
 
-echo "Запуск скрипта обновления..." > /tmp/monitor_update.log
+echo \"Запуск скрипта обновления...\" > /tmp/monitor_update.log
 
 sleep 3
 
-echo "Запуск dpkg -i..." >> /tmp/monitor_update.log
-DEBIAN_FRONTEND=noninteractive sudo dpkg -i "{package_path}" >> /tmp/monitor_update.log 2>&1
+echo \"Запуск dpkg -i...\" >> /tmp/monitor_update.log
+DEBIAN_FRONTEND=noninteractive sudo dpkg -i \"{package_path}\" >> /tmp/monitor_update.log 2>&1
 
-echo "Перезапуск службы..." >> /tmp/monitor_update.log
+echo \"Перезапуск службы...\" >> /tmp/monitor_update.log
 sudo systemctl restart astra-monitor.service >> /tmp/monitor_update.log 2>&1
 
-echo "Скрипт обновления завершен." >> /tmp/monitor_update.log
+echo \"Скрипт обновления завершен.\" >> /tmp/monitor_update.log
 
-rm -f "{package_path}"
-rm -- "$0"
+rm -f \"{package_path}\" 
+rm -- \"$0\"
 """
                     try:
                         with open(update_script_path, "w") as f:
@@ -303,22 +320,22 @@ rm -- "$0"
                     log_file = os.path.join(tempfile.gettempdir(), "updater_log.txt")
 
                     bat_content = f"""@echo off
-set LOGFILE="{log_file}"
+set LOGFILE=\"{log_file}\" 
 
-echo Starting update... > %LOGFILE%
+echo Starting update... > %LOGFILE% 
 
 echo Waiting for old process to terminate... >> %LOGFILE%
 ping 127.0.0.1 -n 5 > nul
 
 echo Attempting to replace executable... >> %LOGFILE%
-move /Y "{actual_package_path}" "{current_exe}" >> %LOGFILE% 2>&1
+move /Y \"{actual_package_path}\" \"{current_exe}\" >> %LOGFILE% 2>&1
 
 echo Restarting the application... >> %LOGFILE%
-cd /D "{exe_dir}"
-start "" "{current_exe}"
+cd /D \"{exe_dir}\" 
+start "" \"{current_exe}\" 
 
 rem Self-destruct
-(goto) 2>nul & del "%~f0"
+(goto) 2>nul & del \"%~f0\"
 """
                     try:
                         with open(updater_bat_path, "w", encoding='cp866') as f:
@@ -425,6 +442,193 @@ rem Self-destruct
         except Exception as e:
             logging.exception("❌ Ошибка при выполнении команды '%s'", command.split(':', 1)[0])
             return {"error": f"❌ Command execution failed: {str(e)}"}
+
+    async def handle_interactive_command(self, websocket, command):
+        parts = command.split(":", 2)
+        action = parts[1]
+
+        if platform.system() == "Windows":
+            if action == "start":
+                if self.interactive_session:
+                    return {"interactive_error": "An interactive session is already running."}
+
+                cmd = parts[2]
+                try:
+                    process = await asyncio.create_subprocess_shell(
+                        cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        stdin=asyncio.subprocess.PIPE,
+                        cwd=self.client.cwd,
+                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+                    )
+                    self.interactive_session = {"process": process}
+                    asyncio.create_task(self.read_and_forward_win_output(websocket, process.stdout, "stdout"))
+                    asyncio.create_task(self.read_and_forward_win_output(websocket, process.stderr, "stderr"))
+                    return {"interactive_started": True}
+                except Exception as e:
+                    return {"interactive_error": f"Failed to start interactive session: {e}"}
+
+            elif action == "input":
+                if not self.interactive_session or not self.interactive_session.get("process"):
+                    return {"interactive_error": "No interactive session is running."}
+                
+                data = parts[2]
+                process = self.interactive_session["process"]
+                try:
+                    process.stdin.write(data.encode('cp866'))
+                    await process.stdin.drain()
+                except (BrokenPipeError, ConnectionResetError):
+                    await self.cleanup_interactive_session(websocket)
+                return None
+
+            elif action == "stop":
+                if not self.interactive_session:
+                    return {"interactive_error": "No interactive session is running."}
+                
+                await self.cleanup_interactive_session(websocket)
+                return {"interactive_stopped": True}
+
+            elif action == "resize":
+                # Not applicable on Windows
+                return None
+
+            else:
+                return {"interactive_error": f"Unknown interactive action: {action}"}
+
+        else: # Linux
+            if action == "start":
+                if self.interactive_session:
+                    return {"interactive_error": "An interactive session is already running."}
+
+                cmd = parts[2]
+                pid, fd = pty.fork()
+                if pid == 0:  # Child
+                    try:
+                        args = cmd.split()
+                        os.execvp(args[0], args)
+                    except Exception as e:
+                        os.write(sys.stdout.fileno(), str(e).encode())
+                        sys.exit(1)
+                else:  # Parent
+                    self.interactive_session = {"pid": pid, "fd": fd}
+                    # Set non-blocking
+                    fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+                    fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+                    asyncio.create_task(self.read_and_forward_pty_output(websocket, fd))
+                    return {"interactive_started": True}
+
+            elif action == "input":
+                if not self.interactive_session:
+                    return {"interactive_error": "No interactive session is running."}
+                
+                data = parts[2]
+                fd = self.interactive_session["fd"]
+                try:
+                    os.write(fd, data.encode())
+                except (BrokenPipeError, OSError):
+                    await self.cleanup_interactive_session(websocket)
+                return None
+
+            elif action == "stop":
+                if not self.interactive_session:
+                    return {"interactive_error": "No interactive session is running."}
+                
+                await self.cleanup_interactive_session(websocket)
+                return {"interactive_stopped": True}
+
+            elif action == "resize":
+                if not self.interactive_session:
+                    return {"interactive_error": "No interactive session is running."}
+                
+                fd = self.interactive_session["fd"]
+                rows, cols = map(int, parts[2].split(','))
+                winsize = struct.pack("HHHH", rows, cols, 0, 0)
+                fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
+                return None
+
+            else:
+                return {"interactive_error": f"Unknown interactive action: {action}"}
+
+    async def read_and_forward_pty_output(self, websocket, fd):
+        try:
+            while self.interactive_session and self.interactive_session.get("fd") == fd:
+                try:
+                    await asyncio.sleep(0.01)
+                    data = os.read(fd, 1024)
+                    if not data:
+                        break
+                    await websocket.send(json.dumps({"interactive_output": {"data": data.decode(errors='replace')}}))
+                except BlockingIOError:
+                    continue
+                except OSError:
+                    break
+        finally:
+            await self.cleanup_interactive_session(websocket)
+
+    async def read_and_forward_win_output(self, websocket, stream, stream_name):
+        # Use cp866 for cmd.exe output
+        decoder = asyncio.StreamReader(stream)
+        try:
+            while self.interactive_session and self.interactive_session.get("process"):
+                try:
+                    data = await asyncio.wait_for(stream.read(1024), timeout=1.0)
+                    if not data:
+                        break
+                    # We try to decode with cp866, as it's the default for Russian Windows cmd.
+                    # Fallback to utf-8, then replace errors.
+                    try:
+                        decoded_data = data.decode('cp866')
+                    except UnicodeDecodeError:
+                        try:
+                            decoded_data = data.decode('utf-8')
+                        except UnicodeDecodeError:
+                            decoded_data = data.decode('latin-1', errors='replace')
+                    
+                    await websocket.send(json.dumps({"interactive_output": {"data": decoded_data}}))
+                except asyncio.TimeoutError:
+                    continue
+                except (BrokenPipeError, ConnectionResetError):
+                    break
+        finally:
+            await self.cleanup_interactive_session(websocket)
+
+    async def cleanup_interactive_session(self, websocket):
+        if not self.interactive_session:
+            return
+
+        session = self.interactive_session
+        self.interactive_session = None
+
+        if platform.system() == "Windows":
+            process = session.get("process")
+            if process and process.returncode is None:
+                try:
+                    # Forcefully terminate the process tree
+                    subprocess.run(f"taskkill /F /T /PID {process.pid}", check=True, capture_output=True)
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    try:
+                        process.terminate()
+                    except ProcessLookupError:
+                        pass # Already terminated
+        else: # Linux
+            pid = session.get("pid")
+            fd = session.get("fd")
+            if pid:
+                try:
+                    os.kill(pid, 15)  # SIGTERM
+                except ProcessLookupError:
+                    pass  # Process already terminated
+            if fd:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        
+        try:
+            await websocket.send(json.dumps({"interactive_stopped": True}))
+        except:
+            pass # Websocket might be closed already
 
     async def list_files(self, path):
         """Список файлов в директории"""

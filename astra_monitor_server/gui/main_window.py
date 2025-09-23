@@ -12,7 +12,7 @@ from collections import defaultdict
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget,
                              QPushButton, QLabel, QTextEdit, QHeaderView, QMessageBox, QInputDialog, QFileDialog,
                              QTabWidget, QGroupBox, QAbstractItemView, QDialog, QStackedWidget, QStatusBar, QFormLayout, QSpinBox, QDialogButtonBox, QProgressDialog,
-                             QListWidget, QListView, QListWidgetItem, QMenu, QSystemTrayIcon, QApplication)
+                             QListWidget, QListView, QListWidgetItem, QMenu, QSystemTrayIcon, QApplication, QComboBox)
 from PyQt5.QtCore import pyqtSignal, Qt, QSize, QTimer, QVariant
 from PyQt5.QtGui import QPixmap, QIcon, QBrush, QColor
 from concurrent.futures import ThreadPoolExecutor
@@ -40,11 +40,17 @@ class QtLogHandler(logging.Handler):
 
 class ServerSettingsDialog(QDialog):
     """Диалог для настроек сервера."""
-    def __init__(self, parent=None, current_interval=10, current_quality=30, current_max_size=100, current_chunk_size=4):
+    def __init__(self, parent=None, current_interval=10, current_quality=30, current_max_size=100, current_chunk_size=4, current_theme='light'):
         super().__init__(parent)
         self.setWindowTitle("Настройки сервера")
         layout = QVBoxLayout(self)
         form_layout = QFormLayout()
+
+        # Настройка темы
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(['light', 'dark'])
+        self.theme_combo.setCurrentText(current_theme)
+        form_layout.addRow("Тема:", self.theme_combo)
 
         # Настройки сетки (скриншоты)
         self.grid_quality_spinbox = QSpinBox()
@@ -85,7 +91,8 @@ class ServerSettingsDialog(QDialog):
             'interval': self.grid_interval_spinbox.value(),
             'quality': self.grid_quality_spinbox.value(),
             'max_size': self.max_size_spinbox.value(),
-            'chunk_size': self.chunk_size_spinbox.value()
+            'chunk_size': self.chunk_size_spinbox.value(),
+            'theme': self.theme_combo.currentText()
         }
 
 class ServerGUI(QMainWindow):
@@ -100,6 +107,7 @@ class ServerGUI(QMainWindow):
         self.pending_downloads = {} # Для предварительно согласованных скачиваний
         self.file_processing_executor = ThreadPoolExecutor(max_workers=os.cpu_count() or 2)
         self.load_settings()
+        self.apply_theme()
 
         self.ws_server = WebSocketServer(
             host=APP_CONFIG['SERVER_HOST'],
@@ -118,6 +126,118 @@ class ServerGUI(QMainWindow):
         self._setup_message_handlers()
         self.setup_websocket_server()
         
+    def apply_theme(self):
+        """Применяет выбранную тему к приложению."""
+        app = QApplication.instance()
+        if self.theme == 'dark':
+            app.setStyleSheet("""
+                QWidget {
+                    background-color: #2b2b2b;
+                    color: #ffffff;
+                    border: none;
+                }
+                QGroupBox {
+                    border: 1px solid #3c3c3c;
+                    margin-top: 1em;
+                    padding-top: 0.5em;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin;
+                    left: 10px;
+                    padding: 0 3px 0 3px;
+                }
+                QHeaderView::section {
+                    background-color: #3c3c3c;
+                    color: #ffffff;
+                    padding: 4px;
+                    border: 1px solid #2b2b2b;
+                }
+                QTabWidget::pane {
+                    border-top: 1px solid #3c3c3c;
+                }
+                QTabBar::tab {
+                    background: #2b2b2b;
+                    color: #b0b0b0;
+                    border: 1px solid #3c3c3c;
+                    border-bottom: none;
+                    padding: 8px;
+                }
+                QTabBar::tab:selected {
+                    background: #3c3c3c;
+                    color: #ffffff;
+                }
+                QTreeWidget, QListWidget {
+                    background-color: #2b2b2b;
+                    color: #ffffff;
+                    border: 1px solid #3c3c3c;
+                }
+                QPushButton {
+                    background-color: #3c3c3c;
+                    color: #ffffff;
+                    border: 1px solid #4f4f4f;
+                    padding: 5px;
+                }
+                QPushButton:hover {
+                    background-color: #4f4f4f;
+                }
+                QPushButton:pressed {
+                    background-color: #2b2b2b;
+                }
+                QTextEdit {
+                    background-color: #222222;
+                    color: #ffffff;
+                    border: 1px solid #3c3c3c;
+                }
+                QLineEdit {
+                    background-color: #222222;
+                    color: #ffffff;
+                    border: 1px solid #3c3c3c;
+                }
+                QSpinBox {
+                    background-color: #222222;
+                    color: #ffffff;
+                    border: 1px solid #3c3c3c;
+                }
+                QCheckBox::indicator {
+                    border: 1px solid #b0b0b0;
+                    background-color: #3c3c3c;
+                }
+                QCheckBox::indicator:checked {
+                    background-color: #4f4f4f;
+                }
+                QSplitter::handle {
+                    background: #3c3c3c;
+                }
+                QMenuBar {
+                    background-color: #2b2b2b;
+                    color: #ffffff;
+                }
+                QMenuBar::item {
+                    background: transparent;
+                }
+                QMenuBar::item:selected {
+                    background: #3c3c3c;
+                }
+                QMenu {
+                    background-color: #2b2b2b;
+                    color: #ffffff;
+                    border: 1px solid #4f4f4f;
+                }
+                QMenu::item:selected {
+                    background-color: #3c3c3c;
+                }
+                QStatusBar {
+                    background-color: #2b2b2b;
+                    color: #ffffff;
+                }
+                QInputDialog, QDialog, QMessageBox {
+                    background-color: #2b2b2b;
+                    color: #ffffff;
+                }
+            """)
+        else:
+            app.setStyleSheet("")
+
     def setup_logging(self):
         """Настраивает перехват логов для отображения в GUI."""
         self.log_signal.connect(self.log_text.append)
@@ -163,6 +283,9 @@ class ServerGUI(QMainWindow):
             'install_output': self._handle_install_output,
             'install_result': self._handle_install_result,
             'message_result': self._handle_message_result,
+            'interactive_started': self._handle_interactive_started,
+            'interactive_output': self._handle_interactive_output,
+            'interactive_stopped': self._handle_interactive_stopped,
         }
 
     def load_settings(self):
@@ -176,12 +299,14 @@ class ServerGUI(QMainWindow):
             self.quality_grid = server_settings.get('quality_grid', 30)
             self.websocket_max_size_mb = server_settings.get('websocket_max_size_mb', 100)
             self.websocket_chunk_size_mb = server_settings.get('websocket_chunk_size_mb', 4)
+            self.theme = server_settings.get('theme', 'light')
         except (FileNotFoundError, json.JSONDecodeError):
             self.custom_commands = self.get_default_custom_commands()
             self.grid_refresh_interval = 10
             self.quality_grid = 30
             self.websocket_max_size_mb = 100
             self.websocket_chunk_size_mb = 4
+            self.theme = 'light'
             self.save_settings()
 
     def save_settings(self):
@@ -192,7 +317,8 @@ class ServerGUI(QMainWindow):
                 'grid_refresh_interval': self.grid_refresh_interval,
                 'quality_grid': self.quality_grid,
                 'websocket_max_size_mb': self.websocket_max_size_mb,
-                'websocket_chunk_size_mb': self.websocket_chunk_size_mb
+                'websocket_chunk_size_mb': self.websocket_chunk_size_mb,
+                'theme': self.theme
             }
         }
         with open(APP_CONFIG['SETTINGS_FILE'], 'w', encoding='utf-8') as f:
@@ -228,22 +354,20 @@ class ServerGUI(QMainWindow):
         self.show_log_action = view_menu.addAction("Показать 'Системный лог'")
         self.show_log_action.triggered.connect(self.show_log_tab)
 
+        settings_menu = menu_bar.addMenu("Настройки")
+        server_settings_action = settings_menu.addAction("Настройки сервера")
+        server_settings_action.triggered.connect(self.open_server_settings)
+
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
         main_layout = QVBoxLayout(central_widget)
         
-        # Status bar
-        status_layout = QHBoxLayout()
+        # Status bar widgets
         self.status_label = QLabel(f"🟢 Сервер запущен на ws://{APP_CONFIG['SERVER_HOST']}:{APP_CONFIG['SERVER_PORT']}")
         self.clients_count_label = QLabel("👥 Клиентов: 0")
-        self.settings_btn = QPushButton("⚙️ Настройки")
-        self.settings_btn.clicked.connect(self.open_server_settings)
-        status_layout.addWidget(self.status_label)
-        status_layout.addWidget(self.clients_count_label)
-        status_layout.addStretch()
-        status_layout.addWidget(self.settings_btn)
-        main_layout.addLayout(status_layout)
+        self.statusBar().addPermanentWidget(self.status_label)
+        self.statusBar().addPermanentWidget(self.clients_count_label)
         
         # Main tabs
         self.tabs = QTabWidget()
@@ -389,13 +513,14 @@ class ServerGUI(QMainWindow):
 
     def open_server_settings(self):
         """Открывает диалог настроек сервера."""
-        dialog = ServerSettingsDialog(self, self.grid_refresh_interval, self.quality_grid, self.websocket_max_size_mb, self.websocket_chunk_size_mb)
+        dialog = ServerSettingsDialog(self, self.grid_refresh_interval, self.quality_grid, self.websocket_max_size_mb, self.websocket_chunk_size_mb, self.theme)
         if dialog.exec_():
             values = dialog.get_values()
             new_interval = values['interval']
             new_quality = values['quality']
             new_max_size = values['max_size']
             new_chunk_size = values['chunk_size']
+            new_theme = values['theme']
 
             if new_chunk_size > new_max_size:
                 QMessageBox.warning(self, "Ошибка настроек", "Размер чанка не может быть больше максимального размера сообщения WebSocket.")
@@ -423,6 +548,12 @@ class ServerGUI(QMainWindow):
                 settings_changed = True
                 websocket_settings_changed = True
             
+            if self.theme != new_theme:
+                self.theme = new_theme
+                logging.info(f"Тема изменена на {new_theme}")
+                self.apply_theme()
+                settings_changed = True
+
             if settings_changed:
                 self.save_settings()
 
@@ -749,6 +880,19 @@ class ServerGUI(QMainWindow):
             msg = f"❌ Ошибка показа сообщения: {data.get('error', 'Unknown error')}"
             sys_msg = f"❌ Ошибка показа сообщения на {client_ip}: {data.get('error', 'Unknown error')}"
             self._log_client_action(client_id, msg, sys_msg)
+
+    def _handle_interactive_started(self, client_id, data):
+        if client_id in self.client_tabs:
+            self.client_tabs[client_id].handle_interactive_started()
+
+    def _handle_interactive_output(self, client_id, data):
+        output_data = data['interactive_output']
+        if client_id in self.client_tabs:
+            self.client_tabs[client_id].handle_interactive_output(output_data['data'])
+
+    def _handle_interactive_stopped(self, client_id, data):
+        if client_id in self.client_tabs:
+            self.client_tabs[client_id].handle_interactive_stopped()
 
     def _cancel_download(self, client_id, remote_path):
         """Обработчик отмены скачивания файла с клиента."""
