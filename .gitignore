@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtualenv
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Project build artifacts
+*.deb
+build_assets/
+build_server_assets/
+
+# IDE
+.idea/
+.vscode/
+
+# User-provided files
+# Эти файлы могут быть предоставлены пользователем и не должны находиться в системе контроля версий.
+server_config.json
+settings.json
