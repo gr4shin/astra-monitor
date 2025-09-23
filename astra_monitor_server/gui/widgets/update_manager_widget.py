@@ -2,18 +2,21 @@
 
 import asyncio
 import base64
+import os
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QComboBox, 
                              QLabel, QPushButton, QTextEdit, QMessageBox, QTableWidget, 
-                             QHeaderView, QAbstractItemView, QTableWidgetItem, QCheckBox)
+                             QHeaderView, QAbstractItemView, QTableWidgetItem, QCheckBox,
+                             QFileDialog)
 from PyQt5.QtGui import QFont
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 
 class UpdateManagerWidget(QWidget):
-    def __init__(self, parent=None, ws_server=None, client_id=None, log_callback=None):
+    run_in_terminal_requested = pyqtSignal(str)
+
+    def __init__(self, parent=None, ws_server=None, client_id=None):
         super().__init__(parent)
         self.ws_server = ws_server
         self.client_id = client_id
-        self.log_callback = log_callback or (lambda msg: print(msg))
         self.repo_files_content = {}
         self.init_ui()
 
@@ -50,13 +53,16 @@ class UpdateManagerWidget(QWidget):
         pkg_layout = QVBoxLayout(pkg_group)
         
         pkg_actions_layout = QHBoxLayout()
-        self.check_updates_btn = QPushButton("🔄 Проверить обновления")
+        self.check_updates_btn = QPushButton("Шаг 1: Обновить списки пакетов (apt update)")
         self.check_updates_btn.clicked.connect(self.check_for_updates)
+        self.list_upgradable_btn = QPushButton("Шаг 2: Показать обновляемые пакеты")
+        self.list_upgradable_btn.clicked.connect(self.list_upgradable_packages)
         self.install_selected_btn = QPushButton("⬆️ Установить выбранные")
         self.install_selected_btn.clicked.connect(self.install_selected_updates)
         self.install_all_btn = QPushButton("🚀 Обновить всю систему")
         self.install_all_btn.clicked.connect(self.install_all_updates)
         pkg_actions_layout.addWidget(self.check_updates_btn)
+        pkg_actions_layout.addWidget(self.list_upgradable_btn)
         pkg_actions_layout.addWidget(self.install_selected_btn)
         pkg_actions_layout.addWidget(self.install_all_btn)
         pkg_actions_layout.addStretch()
@@ -73,29 +79,13 @@ class UpdateManagerWidget(QWidget):
         pkg_layout.addWidget(self.updates_table)
         main_layout.addWidget(pkg_group)
         
-        # --- Output Log ---
-        output_group = QGroupBox("📜 Вывод команд")
-        output_layout = QVBoxLayout(output_group)
-        self.output_log = QTextEdit()
-        self.output_log.setReadOnly(True)
-        self.output_log.setFont(QFont("Monospace", 9))
-        self.output_log.setStyleSheet("background-color: #2b2b2b; color: #f0f0f0;")
-        output_layout.addWidget(self.output_log)
-        main_layout.addWidget(output_group)
-        
         main_layout.setStretch(1, 1) # pkg_group
-        main_layout.setStretch(2, 1) # output_group
-
-    def _send_command(self, command):
-        asyncio.run_coroutine_threadsafe(
-            self.ws_server.send_command(self.client_id, command),
-            self.ws_server.loop
-        )
 
     def load_repositories(self):
-        self.output_log.clear()
-        self.append_output("📚 Запрос списка репозиториев...")
-        self._send_command("apt:get_repos")
+        asyncio.run_coroutine_threadsafe(
+            self.ws_server.send_command(self.client_id, "apt:get_repos"),
+            self.ws_server.loop
+        )
 
     def save_repository(self):
         current_file = self.repo_selector.currentText()
@@ -106,15 +96,22 @@ class UpdateManagerWidget(QWidget):
         content = self.repo_content_edit.toPlainText()
         content_b64 = base64.b64encode(content.encode('utf-8')).decode('ascii')
         
-        self.output_log.clear()
-        self.append_output(f"💾 Сохранение файла {current_file}...")
-        self._send_command(f"apt:save_repo:{current_file}:{content_b64}")
+        asyncio.run_coroutine_threadsafe(
+            self.ws_server.send_command(self.client_id, f"apt:save_repo:{current_file}:{content_b64}"),
+            self.ws_server.loop
+        )
 
     def check_for_updates(self):
-        self.output_log.clear()
         self.updates_table.setRowCount(0)
-        self.append_output("🔄 Выполнение 'apt update'...")
-        self._send_command("apt:update")
+        QMessageBox.information(self, "ℹ️ Информация", "Запущена команда 'apt-get update'.\nОтследить ее выполнение можно в терминале.\nПосле ее завершения, нажмите 'Шаг 2'.")
+        self.run_in_terminal_requested.emit("sudo apt-get update")
+
+    def list_upgradable_packages(self):
+        self.updates_table.setRowCount(0)
+        asyncio.run_coroutine_threadsafe(
+            self.ws_server.send_command(self.client_id, "apt:list_upgradable"),
+            self.ws_server.loop
+        )
 
     def install_selected_updates(self):
         selected_packages = []
@@ -128,29 +125,25 @@ class UpdateManagerWidget(QWidget):
             QMessageBox.warning(self, "⚠️ Нет выбора", "Выберите пакеты для обновления.")
             return
 
-        self.output_log.clear()
-        self.append_output(f"⬆️ Обновление выбранных пакетов: {', '.join(selected_packages)}")
-        self._send_command(f"apt:upgrade_packages:{' '.join(selected_packages)}")
+        self.run_in_terminal_requested.emit(f"sudo apt-get install --only-upgrade -y {' '.join(selected_packages)}")
+        QMessageBox.information(self, "ℹ️ Информация", "Запущена установка выбранных пакетов.\nПосле завершения, нажмите 'Шаг 2', чтобы обновить список.")
 
     def install_all_updates(self):
         reply = QMessageBox.question(self, "❓ Подтверждение", "Вы уверены, что хотите обновить всю систему?", QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
-            self.output_log.clear()
-            self.append_output("🚀 Выполнение 'apt upgrade'...")
-            self._send_command("apt:full_upgrade")
+            self.run_in_terminal_requested.emit("sudo apt-get upgrade -y --enable-upgrade")
+            QMessageBox.information(self, "ℹ️ Информация", "Запущено полное обновление системы.\nПосле завершения, нажмите 'Шаг 2', чтобы обновить список.")
 
     def display_repo_content(self, filename):
         if filename in self.repo_files_content:
             self.repo_content_edit.setText(self.repo_files_content[filename])
 
     def handle_repo_data(self, data):
-        self.append_output("✅ Список репозиториев получен.")
         self.repo_files_content = data
         self.repo_selector.clear()
         self.repo_selector.addItems(sorted(data.keys()))
 
     def handle_upgradable_list(self, packages):
-        self.append_output(f"✅ Найдено {len(packages)} пакетов для обновления.")
         self.updates_table.setRowCount(len(packages))
         for i, pkg in enumerate(packages):
             # Checkbox
@@ -167,7 +160,3 @@ class UpdateManagerWidget(QWidget):
             self.updates_table.setItem(i, 3, QTableWidgetItem(pkg.get('new', '')))
         self.updates_table.resizeColumnsToContents()
         self.updates_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-
-    def append_output(self, text):
-        self.output_log.append(text.strip())
-        self.output_log.verticalScrollBar().setValue(self.output_log.verticalScrollBar().maximum())

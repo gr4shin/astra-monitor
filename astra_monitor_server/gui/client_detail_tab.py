@@ -7,7 +7,7 @@ from PyQt5.QtWidgets import (
     QStackedWidget, QPushButton, QSplitter, QTextEdit,
     QLineEdit, QLabel, QMessageBox, QSpinBox, QCheckBox, QFormLayout)
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QFont, QIntValidator
+from PyQt5.QtGui import QFont, QIntValidator, QTextCursor
 
 # Импортируем локальные модули
 from .dialogs.custom_command_dialog import CustomCommandDialog
@@ -32,6 +32,7 @@ class ClientDetailTab(QWidget):
         self.os_type = self.client_data.get('os_type', 'Linux') # Default to Linux for safety
         self.client_settings = client_settings or {}
         self.main_window = main_window # Store main window reference
+        self.interactive_session = False
         self.init_ui()
         self.log_message_requested.connect(self.log_to_client)
         self.append_to_log_signal.connect(self.log_to_client)
@@ -71,10 +72,10 @@ class ClientDetailTab(QWidget):
         # Assign widgets to instance variables for later access
         self.system_info_full_widget = self.menu_map["ℹ️Информация о системе"][0]
         self.file_manager_widget = self.menu_map["📂 Файловый менеджер"][0]
-        # The commands widget is created and assigned in the map, but we need to access its children
-        commands_widget = self.menu_map["⌨️ Команды"][0]
+        self.commands_widget = self.menu_map["⌨️ Команды"][0]
         if self.os_type == 'Linux':
             self.update_manager_widget = self.menu_map["🔄 Управление обновлениями"][0]
+            self.update_manager_widget.run_in_terminal_requested.connect(self.run_command_in_terminal)
         self.screenshot_widget = self.menu_map["🖼️ Экран клиента"][0]
         self.client_log_output = self.menu_map["📜 Журнал клиента"][0]
         self.client_log_output.setReadOnly(True)
@@ -86,9 +87,7 @@ class ClientDetailTab(QWidget):
         layout.addWidget(left_widget, 1)
         layout.addWidget(self.content_stack, 3)
         
-        # Показываем системную инфу по умолчанию
         self.menu_list.setCurrentRow(0)
-        self.terminal_output.append("🖥️ Добро пожаловать в терминал клиента!\n")
 
     def _create_commands_widget(self):
         commands_widget = QWidget()
@@ -161,16 +160,12 @@ class ClientDetailTab(QWidget):
         self.terminal_output.setFont(QFont("Monospace", 10))
         self.terminal_output.setStyleSheet("background-color: #2b2b2b; color: #f0f0f0;")
         
-        input_layout = QHBoxLayout()
-        self.prompt_label = QLabel(f"{self.client_data.get('hostname', 'client')}:~>")
         self.terminal_input = QLineEdit()
         self.terminal_input.setFont(QFont("Monospace", 10))
         self.terminal_input.returnPressed.connect(self.execute_terminal_command)
-        input_layout.addWidget(self.prompt_label)
-        input_layout.addWidget(self.terminal_input)
 
         terminal_layout.addWidget(self.terminal_output)
-        terminal_layout.addLayout(input_layout)
+        terminal_layout.addWidget(self.terminal_input)
         splitter.addWidget(terminal_group)
         splitter.setSizes([250, 400])
 
@@ -247,7 +242,6 @@ class ClientDetailTab(QWidget):
         settings_buttons_layout.addWidget(save_settings_btn)
         settings_buttons_layout.addWidget(reset_settings_btn)
 
-        # Добавляем все группы в layout
         settings_layout.addWidget(screenshot_group)
         settings_layout.addWidget(monitoring_group)
         settings_layout.addWidget(connection_group)
@@ -267,45 +261,69 @@ class ClientDetailTab(QWidget):
     def change_content(self, index):
         """Изменение отображаемого контента"""
         self.content_stack.setCurrentIndex(index)
-        # Если выбрана информация о системе, запрашиваем данные
-        if index == 0:
+        selected_item_name = self.visible_menu_items[index]
+
+        if selected_item_name == "ℹ️Информация о системе":
             self.get_full_system_info()
+        elif selected_item_name == "⌨️ Команды":
+            self.start_interactive_session_if_not_running()
         
     def update_client_data(self, new_data):
         """Обновление данных клиента"""
         self.client_data.update(new_data)
-        # Данные для виджета полной информации обновляются через main_window
-        # при получении сообщения 'full_system_info'
 
     def log_to_client(self, message):
         """Добавление сообщения в лог клиента."""
         self.client_log_output.append(message)
         self.client_log_output.verticalScrollBar().setValue(self.client_log_output.verticalScrollBar().maximum())
 
-    def append_to_terminal(self, text, is_command=False):
+    def append_to_terminal(self, text):
         """Добавление текста в окно терминала"""
-        if is_command:
-            prompt = self.prompt_label.text()
-            self.terminal_output.append(f"<font color='#87d7ff'>{prompt}</font> <font color='white'>{text}</font>")
-        else:
-            # Экранируем HTML-сущности и заменяем переносы строк
-            text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-            text = text.replace('\n', '<br>')
-            self.terminal_output.append(f"<font color='#d3d3d3'>{text}</font>")
+        cursor = self.terminal_output.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.terminal_output.setTextCursor(cursor)
+        self.terminal_output.insertPlainText(text)
         self.terminal_output.verticalScrollBar().setValue(self.terminal_output.verticalScrollBar().maximum())
 
-    def update_prompt(self, path):
-        """Обновление промпта терминала с новым путем"""
-        hostname = self.client_data.get('hostname', 'client')
-        self.prompt_label.setText(f"{hostname}:{path}>")
+    def handle_interactive_output(self, data):
+        self.append_to_terminal(data)
+
+    def handle_interactive_started(self):
+        self.interactive_session = True
+        self.terminal_output.clear()
+        self.log_message_requested.emit(f"Интерактивная сессия запущена.")
+
+    def handle_interactive_stopped(self):
+        self.interactive_session = False
+        self.log_message_requested.emit(f"Интерактивная сессия завершена.")
+        self.append_to_terminal("\n[+] Сессия завершена. Для старта новой сессии, введите команду.\n")
+
+    def update_prompt(self, path): # DEPRECATED
+        pass
+
+    def run_command_in_terminal(self, command):
+        """Runs a command in the interactive terminal session without switching tabs."""
+        if self.interactive_session:
+            self.execute_command(command)
+        else:
+            # Start the session if not running, then execute the command
+            self.start_interactive_session_if_not_running(initial_command=command)
 
     def execute_command(self, command, name=""):
         """Общий метод для выполнения команд"""
-        self.append_to_terminal(command, is_command=True)
-        future = asyncio.run_coroutine_threadsafe(
-            self.ws_server.send_command(self.client_id, f"execute:{command}"), 
-            self.ws_server.loop
-        )
+        if self.interactive_session:
+            future = asyncio.run_coroutine_threadsafe(
+                self.ws_server.send_command(self.client_id, f"interactive:input:{command}\n"), 
+                self.ws_server.loop
+            )
+        else:
+            # Fallback for non-interactive quick commands
+            self.append_to_terminal(f"> {command}\n")
+            future = asyncio.run_coroutine_threadsafe(
+                self.ws_server.send_command(self.client_id, f"execute:{command}"), 
+                self.ws_server.loop
+            )
+        
         client_name = self.client_data.get('hostname', self.client_id)
         log_name = name if name else command
         self.log_message_requested.emit(f"▶️ Выполнение команды на {client_name}: {log_name}")
@@ -327,8 +345,25 @@ class ClientDetailTab(QWidget):
         """Выполнение команды из строки ввода терминала"""
         command = self.terminal_input.text().strip()
         if command:
-            self.execute_command(command)
+            if self.interactive_session:
+                self.execute_command(command)
+            else:
+                # If session is not active, the first command will start it.
+                self.start_interactive_session_if_not_running(command)
+            
             self.terminal_input.clear()
+
+    def start_interactive_session_if_not_running(self, initial_command=None):
+        if not self.interactive_session:
+            shell_cmd = "bash -i" if self.os_type == 'Linux' else "cmd.exe"
+            self.log_message_requested.emit(f"Запуск интерактивной сессии ({shell_cmd})...")
+            asyncio.run_coroutine_threadsafe(
+                self.ws_server.send_command(self.client_id, f"interactive:start:{shell_cmd}"),
+                self.ws_server.loop
+            )
+            if initial_command:
+                # Wait a bit for the session to start before sending the first command
+                asyncio.get_event_loop().call_later(0.5, lambda: self.execute_command(initial_command))
     
     def add_custom_command(self):
         """Добавление новой кастомной команды"""
@@ -369,16 +404,13 @@ class ClientDetailTab(QWidget):
                 QMessageBox.warning(self, "⚠️ Внимание", "Название и команда не могут быть пустыми.")
                 return
 
-            # Если имя не изменилось, просто обновляем команду
             if old_name == new_name:
                 self.custom_commands[old_name] = new_command
                 self.log_message_requested.emit(f"✏️ Команда '{old_name}' обновлена.")
             else:
-                # Если имя изменилось, нужно проверить, не занято ли новое имя
                 if new_name in self.custom_commands:
                     QMessageBox.warning(self, "⚠️ Внимание", f"Команда с именем '{new_name}' уже существует.")
                     return
-                # Удаляем старую команду и добавляем новую
                 del self.custom_commands[old_name]
                 self.custom_commands[new_name] = new_command
                 current_item.setText(new_name)
@@ -392,7 +424,7 @@ class ClientDetailTab(QWidget):
         if current_item:
             command_name = current_item.text()
             reply = QMessageBox.question(
-                self,
+                self, 
                 "❓ Подтверждение", 
                 f"Вы уверены, что хотите удалить команду '{command_name}'?",
                 QMessageBox.Yes | QMessageBox.No
@@ -421,13 +453,11 @@ class ClientDetailTab(QWidget):
                 }
             }
             
-            # Отправляем настройки клиенту
             future = asyncio.run_coroutine_threadsafe(
                 self.ws_server.send_command(self.client_id, f"apply_settings:{json.dumps(settings)}"), 
                 self.ws_server.loop
             )
             
-            # Сообщаем главному окну об изменении, чтобы оно сохранило их
             self.settings_changed.emit(settings)
             client_name = self.client_data.get('hostname', self.client_id)
             self.log_message_requested.emit(f"⚙️ Настройки отправлены клиенту {client_name}. Полностью применяться после переподключения клиента.")
@@ -439,7 +469,7 @@ class ClientDetailTab(QWidget):
     def reset_settings(self):
         """Сброс настроек к значениям по умолчанию"""
         reply = QMessageBox.question(
-            self,
+            self, 
             "❓ Подтверждение", 
             "Вы уверены, что хотите сбросить настройки к значениям по умолчанию?",
             QMessageBox.Yes | QMessageBox.No
