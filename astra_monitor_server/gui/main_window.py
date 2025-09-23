@@ -200,7 +200,6 @@ class ServerGUI(QMainWindow):
 
     def get_default_custom_commands(self):
         return {
-            "Проверка обновлений": "sudo apt update && apt list --upgradable",
             "Сетевые интерфейсы": "ip addr show",
             "Активные соединения": "ss -tuln",
             "Журнал системы": "sudo journalctl -n 20",

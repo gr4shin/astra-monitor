@@ -105,7 +105,7 @@ class ClientDetailTab(QWidget):
         quick_commands_layout = QVBoxLayout(quick_commands_group)
 
         if self.os_type == 'Linux':
-            quick_commands = [("🔄 Обновить пакеты", "sudo apt update"), ("📦 Обновить систему", "sudo apt upgrade -y"), ("🧹 Очистить кэш", "sudo apt autoremove -y && sudo apt clean"), ("📊 Проверить диски", "df -h"), ("🌐 Сетевые соединения", "ss -tuln"), ("👥 Активные пользователи", "who"), ("⏰ Uptime системы", "uptime")]
+            quick_commands = [("🧹 Очистить кэш", "sudo apt autoremove -y && sudo apt clean"), ("📊 Проверить диски", "df -h"), ("🌐 Сетевые соединения", "ss -tuln"), ("👥 Активные пользователи", "who"), ("⏰ Uptime системы", "uptime")]
         else: # Windows
             quick_commands = [("📦 Показать обновления", "winget upgrade"), ("⬆️ Обновить все пакеты", "winget upgrade --all --accept-source-agreements"), ("📊 Проверить диски", "wmic logicaldisk get size,freespace,caption"), ("🌐 Сетевые соединения", "netstat -an"), ("👥 Активные пользователи", "query user"), ("⏰ Uptime системы", "systeminfo | find \"System Boot Time\"")]
 
