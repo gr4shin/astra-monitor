@@ -121,17 +121,32 @@ class ClientDetailTab(QWidget):
         custom_commands_layout = QVBoxLayout(custom_commands_group)
         self.custom_commands_list = QListWidget()
         self.custom_commands_list.addItems(self.custom_commands.keys())
-        self.custom_commands_list.itemDoubleClicked.connect(self.execute_custom_command)
+        self.custom_commands_list.itemDoubleClicked.connect(self.edit_custom_command)
+        
         custom_buttons_layout = QHBoxLayout()
+        
+        exec_btn = QPushButton("▶️ Выполнить")
+        exec_btn.setToolTip("Выполнить выбранную команду")
+        exec_btn.clicked.connect(self.execute_selected_custom_command)
+        
         add_btn = QPushButton("➕ Добавить")
-        add_btn.setToolTip("Добавить команду")
+        add_btn.setToolTip("Добавить новую команду")
         add_btn.clicked.connect(self.add_custom_command)
+        
+        edit_btn = QPushButton("✏️ Редактировать")
+        edit_btn.setToolTip("Редактировать выбранную команду")
+        edit_btn.clicked.connect(self.edit_custom_command)
+        
         remove_btn = QPushButton("➖ Удалить")
-        remove_btn.setToolTip("Удалить команду")
+        remove_btn.setToolTip("Удалить выбранную команду")
         remove_btn.clicked.connect(self.remove_custom_command)
+        
+        custom_buttons_layout.addWidget(exec_btn)
         custom_buttons_layout.addWidget(add_btn)
+        custom_buttons_layout.addWidget(edit_btn)
         custom_buttons_layout.addWidget(remove_btn)
         custom_buttons_layout.addStretch()
+        
         custom_commands_layout.addWidget(self.custom_commands_list)
         custom_commands_layout.addLayout(custom_buttons_layout)
         command_lists_layout.addWidget(custom_commands_group)
@@ -295,9 +310,15 @@ class ClientDetailTab(QWidget):
         log_name = name if name else command
         self.log_message_requested.emit(f"▶️ Выполнение команды на {client_name}: {log_name}")
     
-    def execute_custom_command(self, item):
-        """Выполнение кастомной команды"""
-        command_name = item.text()
+    def execute_selected_custom_command(self):
+        """Выполнение выбранной кастомной команды"""
+        current_item = self.custom_commands_list.currentItem()
+        if current_item:
+            command_name = current_item.text()
+            self.execute_custom_command(command_name)
+
+    def execute_custom_command(self, command_name):
+        """Выполнение кастомной команды по имени"""
         command = self.custom_commands.get(command_name, "")
         if command:
             self.execute_command(command, command_name)
@@ -314,19 +335,65 @@ class ClientDetailTab(QWidget):
         dialog = CustomCommandDialog(self)
         if dialog.exec_():
             command_data = dialog.get_command_data()
-            if command_data['name'] and command_data['command']:
-                self.custom_commands[command_data['name']] = command_data['command']
-                self.custom_commands_list.addItem(command_data['name'])
-                self.log_message_requested.emit(f"✅ Добавлена новая команда: {command_data['name']}")
+            name = command_data['name']
+            command = command_data['command']
+            
+            if name and command:
+                if name in self.custom_commands:
+                    QMessageBox.warning(self, "⚠️ Внимание", f"Команда с именем '{name}' уже существует.")
+                    return
+                
+                self.custom_commands[name] = command
+                self.custom_commands_list.addItem(name)
+                self.log_message_requested.emit(f"✅ Добавлена новая команда: {name}")
                 self.custom_commands_updated.emit()
-    
+
+    def edit_custom_command(self):
+        """Редактирование выбранной кастомной команды"""
+        current_item = self.custom_commands_list.currentItem()
+        if not current_item:
+            QMessageBox.warning(self, "⚠️ Внимание", "Пожалуйста, выберите команду для редактирования.")
+            return
+
+        old_name = current_item.text()
+        command = self.custom_commands.get(old_name, "")
+        
+        dialog = CustomCommandDialog(self, command_data={"name": old_name, "command": command})
+        
+        if dialog.exec_():
+            new_data = dialog.get_command_data()
+            new_name = new_data['name']
+            new_command = new_data['command']
+
+            if not new_name or not new_command:
+                QMessageBox.warning(self, "⚠️ Внимание", "Название и команда не могут быть пустыми.")
+                return
+
+            # Если имя не изменилось, просто обновляем команду
+            if old_name == new_name:
+                self.custom_commands[old_name] = new_command
+                self.log_message_requested.emit(f"✏️ Команда '{old_name}' обновлена.")
+            else:
+                # Если имя изменилось, нужно проверить, не занято ли новое имя
+                if new_name in self.custom_commands:
+                    QMessageBox.warning(self, "⚠️ Внимание", f"Команда с именем '{new_name}' уже существует.")
+                    return
+                # Удаляем старую команду и добавляем новую
+                del self.custom_commands[old_name]
+                self.custom_commands[new_name] = new_command
+                current_item.setText(new_name)
+                self.log_message_requested.emit(f"✏️ Команда '{old_name}' переименована в '{new_name}'.")
+            
+            self.custom_commands_updated.emit()
+
     def remove_custom_command(self):
         """Удаление кастомной команды"""
         current_item = self.custom_commands_list.currentItem()
         if current_item:
             command_name = current_item.text()
             reply = QMessageBox.question(
-                self, "❓ Подтверждение", 
+                self,
+                "❓ Подтверждение", 
                 f"Вы уверены, что хотите удалить команду '{command_name}'?",
                 QMessageBox.Yes | QMessageBox.No
             )
@@ -372,7 +439,8 @@ class ClientDetailTab(QWidget):
     def reset_settings(self):
         """Сброс настроек к значениям по умолчанию"""
         reply = QMessageBox.question(
-            self, "❓ Подтверждение", 
+            self,
+            "❓ Подтверждение", 
             "Вы уверены, что хотите сбросить настройки к значениям по умолчанию?",
             QMessageBox.Yes | QMessageBox.No
         )

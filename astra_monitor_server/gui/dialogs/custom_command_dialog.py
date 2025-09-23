@@ -3,12 +3,18 @@
 from PyQt5.QtWidgets import QDialog, QFormLayout, QLineEdit, QDialogButtonBox
 
 class CustomCommandDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, command_data=None):
         super().__init__(parent)
-        self.setWindowTitle("Добавить кастомную команду")
+        self.is_edit = command_data is not None
+        title = "Редактировать кастомную команду" if self.is_edit else "Добавить кастомную команду"
+        self.setWindowTitle(title)
         self.setModal(True)
         self.resize(500, 150)
         self.init_ui()
+
+        if self.is_edit and command_data:
+            self.name_input.setText(command_data.get("name", ""))
+            self.command_input.setText(command_data.get("command", ""))
         
     def init_ui(self):
         layout = QFormLayout(self)

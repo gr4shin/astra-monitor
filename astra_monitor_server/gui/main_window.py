@@ -217,6 +217,17 @@ class ServerGUI(QMainWindow):
         self.setGeometry(100, 100, 1200, 800)
         self.setWindowIcon(self.app_icon)
         self.setStatusBar(QStatusBar(self))
+        
+        # --- Menu Bar ---
+        menu_bar = self.menuBar()
+        view_menu = menu_bar.addMenu("Вид")
+        
+        self.show_clients_action = view_menu.addAction("Показать 'Клиенты'")
+        self.show_clients_action.triggered.connect(self.show_clients_tab)
+        
+        self.show_log_action = view_menu.addAction("Показать 'Системный лог'")
+        self.show_log_action.triggered.connect(self.show_log_tab)
+
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
@@ -236,10 +247,13 @@ class ServerGUI(QMainWindow):
         
         # Main tabs
         self.tabs = QTabWidget()
+        self.tabs.setTabsClosable(True)
+        self.tabs.tabBar().setMovable(True)
+        self.tabs.tabCloseRequested.connect(self.close_tab)
         
         # 1. Вкладка со списком клиентов
-        clients_tab = QWidget()
-        clients_layout = QVBoxLayout(clients_tab)
+        self.clients_list_tab = QWidget()
+        clients_layout = QVBoxLayout(self.clients_list_tab)
         
         # Дерево клиентов
         clients_group = QGroupBox("🖥️ Подключенные клиенты")
@@ -292,16 +306,16 @@ class ServerGUI(QMainWindow):
         clients_layout.addWidget(clients_group)
         
         # 2. Вкладка лога
-        log_tab = QWidget()
-        log_layout = QVBoxLayout(log_tab)
+        self.log_view_tab = QWidget()
+        log_layout = QVBoxLayout(self.log_view_tab)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         log_layout.addWidget(QLabel("📜 Системный лог:"))
         log_layout.addWidget(self.log_text)
         
         # Добавляем вкладки
-        self.tabs.addTab(clients_tab, "🖥️ Клиенты")
-        self.tabs.addTab(log_tab, "📜 Системный лог")
+        self.tabs.addTab(self.clients_list_tab, "🖥️ Клиенты")
+        self.tabs.addTab(self.log_view_tab, "📜 Системный лог")
         
         main_layout.addWidget(self.tabs)
         
@@ -786,7 +800,7 @@ class ServerGUI(QMainWindow):
             progress_dialog.setValue(percent)
         
         progress_dialog.setLabelText(
-            f"Скачивание файла '{os.path.basename(context['path'])}'...\n"
+            f"Скачивание файла '{os.path.basename(context['path'])}' ભ...\n"
             f"{received / 1024 / 1024:.2f} MB / {total / 1024 / 1024:.2f} MB"
         )
 
@@ -1110,6 +1124,62 @@ class ServerGUI(QMainWindow):
         self.tabs.setCurrentIndex(tab_index)
         self.client_tabs[client_id] = tab
 
+    def show_clients_tab(self):
+        """Показывает вкладку 'Клиенты', если она закрыта."""
+        # Проверяем, не открыта ли уже вкладка
+        for i in range(self.tabs.count()):
+            if self.tabs.widget(i) == self.clients_list_tab:
+                self.tabs.setCurrentIndex(i)
+                return
+        # Вставляем на первую позицию
+        index = self.tabs.insertTab(0, self.clients_list_tab, "🖥️ Клиенты")
+        self.tabs.setCurrentIndex(index)
+
+    def show_log_tab(self):
+        """Показывает вкладку 'Системный лог', если она закрыта."""
+        # Проверяем, не открыта ли уже вкладка
+        for i in range(self.tabs.count()):
+            if self.tabs.widget(i) == self.log_view_tab:
+                self.tabs.setCurrentIndex(i)
+                return
+        
+        # Ищем вкладку клиентов, чтобы вставить лог после нее
+        client_tab_index = -1
+        for i in range(self.tabs.count()):
+            if self.tabs.widget(i) == self.clients_list_tab:
+                client_tab_index = i
+                break
+        
+        insert_pos = client_tab_index + 1 if client_tab_index != -1 else 0
+        index = self.tabs.insertTab(insert_pos, self.log_view_tab, "📜 Системный лог")
+        self.tabs.setCurrentIndex(index)
+
+    def close_tab(self, index):
+        """Закрытие вкладки."""
+        widget = self.tabs.widget(index)
+        if not widget:
+            return
+
+        # Вкладки клиентов имеют тип ClientDetailTab, остальные - системные
+        if not isinstance(widget, ClientDetailTab):
+            # Для системных вкладок - просто удаляем из QTabWidget, не удаляя сам виджет
+            self.tabs.removeTab(index)
+            return
+
+        # Для вкладок клиентов - логика с полным удалением
+        client_id_to_remove = None
+        for cid, tab_widget in self.client_tabs.items():
+            if tab_widget == widget:
+                client_id_to_remove = cid
+                break
+        
+        if client_id_to_remove:
+            del self.client_tabs[client_id_to_remove]
+            logging.info(f"Закрыта вкладка для клиента {client_id_to_remove}")
+
+        self.tabs.removeTab(index)
+        widget.deleteLater()
+
     def send_message_to_clients(self):
         """Отправка сообщения выбранным клиентам."""
         selected_ids = self.get_selected_client_ids()
@@ -1122,7 +1192,7 @@ class ServerGUI(QMainWindow):
 
         for client_id in selected_ids:
             client_ip = self.client_data[client_id].get('ip', 'unknown')
-            self._log_client_action(client_id, f"Отправка сообщения клиенту...", f"Отправка сообщения клиенту {client_ip}...")
+            self._log_client_action(client_id, "Отправка сообщения клиенту...", f"Отправка сообщения клиенту {client_ip}...")
             asyncio.run_coroutine_threadsafe(
                 self.ws_server.send_command(client_id, f"show_message:{message}"),
                 self.ws_server.loop

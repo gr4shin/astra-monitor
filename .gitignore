@@ -16,6 +16,7 @@ dist/
 *.deb
 build_assets/
 build_server_assets/
+*.log
 
 # IDE
 .idea/

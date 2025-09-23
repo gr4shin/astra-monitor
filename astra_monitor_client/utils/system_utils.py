@@ -270,16 +270,79 @@ def get_uptime():
             return "N/A"
 
 def get_install_date():
+    """
+    Получает дату установки ОС.
+    Для Linux пробует несколько методов для надежности.
+    Для Windows использует WMI.
+    """
     if platform.system() == "Windows":
+        if wmi:
+            try:
+                os_info = wmi.WMI().Win32_OperatingSystem()[0]
+                install_date_str = os_info.InstallDate.split('.')[0]
+                return datetime.strptime(install_date_str, '%Y%m%d%H%M%S').strftime('%Y-%m-%d')
+            except Exception:
+                pass
         return "N/A"
-    else:
+    else:  # For Linux/Unix
+        # Method 1: Filesystem birth time (most reliable for modern systems)
+        try:
+            result = subprocess.run(
+                ['stat', '-c', '%W', '/'],
+                capture_output=True, text=True, check=True, stderr=subprocess.DEVNULL
+            )
+            timestamp_str = result.stdout.strip()
+            if timestamp_str and timestamp_str != '0':
+                timestamp = int(timestamp_str)
+                return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d')
+        except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
+            pass
+
+        # Method 2: tune2fs (very reliable for ext filesystems)
+        try:
+            df_output = subprocess.check_output(['df', '/'], text=True)
+            root_device = df_output.split('\n')[1].split()[0]
+            if root_device.startswith('/dev/'):
+                tune2fs_output = subprocess.check_output(['tune2fs', '-l', root_device], text=True, stderr=subprocess.DEVNULL)
+                for line in tune2fs_output.split('\n'):
+                    if 'Filesystem created:' in line:
+                        date_str = line.split(':', 1)[1].strip()
+                        try:
+                            return datetime.strptime(date_str, '%a %b %d %H:%M:%S %Y').strftime('%Y-%m-%d')
+                        except ValueError:
+                            pass
+        except (subprocess.CalledProcessError, FileNotFoundError, IndexError, AttributeError):
+            pass
+
+        # Method 3: Original method - /var/log/installer/syslog
         try:
             if os.path.exists('/var/log/installer/syslog'):
                 mtime = os.path.getmtime('/var/log/installer/syslog')
                 return datetime.fromtimestamp(mtime).strftime('%Y-%m-%d')
-        except Exception:
+        except OSError:
             pass
+            
+        # Method 4: dpkg log for base-files package (for Debian-based systems)
+        try:
+            if os.path.exists('/var/log/dpkg.log'):
+                with open('/var/log/dpkg.log', 'r') as f:
+                    for line in f:
+                        if 'status installed base-files' in line:
+                            date_str = line.split(' ')[0]
+                            datetime.strptime(date_str, '%Y-%m-%d')
+                            return date_str
+        except (IOError, ValueError):
+            pass
+
+        # Method 5: Creation time of /etc/passwd
+        try:
+            ctime = os.path.getctime('/etc/passwd')
+            return datetime.fromtimestamp(ctime).strftime('%Y-%m-%d')
+        except OSError:
+            pass
+
         return "N/A"
+
 
 def get_astra_version():
     """Получение версии системы"""

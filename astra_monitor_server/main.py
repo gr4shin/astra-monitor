@@ -1,8 +1,16 @@
 # astra_monitor_server/main.py
 
 import sys
+import os
 import logging
 from PyQt5.QtWidgets import QApplication
+
+# Добавляем корневую папку проекта в sys.path, чтобы разрешить абсолютные импорты.
+# Это позволяет запускать main.py напрямую из его папки.
+if __package__ is None or __package__ == '':
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
 
 from astra_monitor_server.gui.main_window import ServerGUI
 
