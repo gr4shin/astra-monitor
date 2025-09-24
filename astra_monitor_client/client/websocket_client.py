@@ -190,7 +190,6 @@ class SystemMonitorClient:
                         "auth_token": self.AUTH_TOKEN,
                         "client_info": {
                             "hostname": self.hostname,
-                            "ip": self.local_ip,
                             "os_type": platform.system(),
                             "platform_full": platform.platform(),
                             "settings": self.settings
