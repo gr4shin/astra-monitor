@@ -254,7 +254,7 @@ class CommandHandler:
                         return None
 
                     elif apt_cmd == "full_upgrade":
-                        asyncio.create_task(self.stream_command_output(websocket, "sudo apt update && sudo apt-get dist upgrade"))
+                        asyncio.create_task(self.stream_command_output(websocket, "sudo apt update && sudo apt-get dist-upgrade"))
                         return None
                 else:
                     return {"error": "Command not supported on this platform"}
@@ -498,10 +498,14 @@ rem Self-destruct
 
         else: # Linux
             if action == "start":
+                logging.info("-> ⏯️ Получена команда interactive:start.")
+                logging.debug(f"Текущее состояние интерактивной сессии: {self.interactive_session}")
                 if self.interactive_session:
-                    return {"interactive_error": "An interactive session is already running."}
+                    logging.warning("-> ⚠️ Попытка запустить интерактивную сессию, когда она уже существует. Попытка очистить старую.")
+                    await self.cleanup_interactive_session(websocket)
 
                 cmd = parts[2]
+                logging.info(f"-> 🚀 Запуск нового pty с командой: {cmd}")
                 pid, fd = pty.fork()
                 if pid == 0:  # Child
                     try:
@@ -512,6 +516,7 @@ rem Self-destruct
                         sys.exit(1)
                 else:  # Parent
                     self.interactive_session = {"pid": pid, "fd": fd}
+                    logging.info(f"-> ✅ PTY запущен. PID: {pid}, FD: {fd}")
                     # Set non-blocking
                     fl = fcntl.fcntl(fd, fcntl.F_GETFL)
                     fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
@@ -593,12 +598,16 @@ rem Self-destruct
         finally:
             await self.cleanup_interactive_session(websocket)
 
-    async def cleanup_interactive_session(self, websocket):
+    async def cleanup_interactive_session(self, websocket=None):
+        logging.debug("-> 🧹 Вызов cleanup_interactive_session.")
         if not self.interactive_session:
+            logging.debug("-> 🧹 Интерактивная сессия не активна, очистка не требуется.")
             return
 
         session = self.interactive_session
+        logging.info(f"-> 🧹 Очистка интерактивной сессии: {session}")
         self.interactive_session = None
+        logging.info("-> 🧹 interactive_session установлена в None.")
 
         if platform.system() == "Windows":
             process = session.get("process")
@@ -625,10 +634,11 @@ rem Self-destruct
                 except OSError:
                     pass
         
-        try:
-            await websocket.send(json.dumps({"interactive_stopped": True}))
-        except:
-            pass # Websocket might be closed already
+        if websocket:
+            try:
+                await websocket.send(json.dumps({"interactive_stopped": True}))
+            except:
+                pass # Websocket might be closed already
 
     async def list_files(self, path):
         """Список файлов в директории"""
