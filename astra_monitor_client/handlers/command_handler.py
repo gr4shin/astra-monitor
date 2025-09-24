@@ -254,7 +254,7 @@ class CommandHandler:
                         return None
 
                     elif apt_cmd == "full_upgrade":
-                        asyncio.create_task(self.stream_command_output(websocket, "sudo apt-get upgrade -y --enable-upgrade"))
+                        asyncio.create_task(self.stream_command_output(websocket, "sudo apt update && sudo apt-get dist upgrade"))
                         return None
                 else:
                     return {"error": "Command not supported on this platform"}
