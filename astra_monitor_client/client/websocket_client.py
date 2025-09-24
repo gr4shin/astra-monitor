@@ -233,12 +233,18 @@ class SystemMonitorClient:
                             
             except websockets.exceptions.ConnectionClosed:
                 logging.warning("🔌 Соединение разорвано, повторная попытка через %s секунд...", self.settings['reconnect_delay'])
+                logging.info("-> 🧹 Соединение разорвано, запускается очистка интерактивной сессии...")
+                await self.command_handler.cleanup_interactive_session()
                 await asyncio.sleep(self.settings['reconnect_delay'])
             except ConnectionRefusedError:
                 logging.error("❌ Сервер недоступен, повторная попытка через %s секунд...", self.settings['reconnect_delay'])
+                logging.info("-> 🧹 Соединение недоступно, запускается очистка интерактивной сессии...")
+                await self.command_handler.cleanup_interactive_session()
                 await asyncio.sleep(self.settings['reconnect_delay'])
             except Exception:
                 logging.exception("🔌 Непредвиденная ошибка подключения, повтор через %s секунд...", self.settings['reconnect_delay'])
+                logging.info("-> 🧹 Непредвиденная ошибка, запускается очистка интерактивной сессии...")
+                await self.command_handler.cleanup_interactive_session()
                 await asyncio.sleep(self.settings['reconnect_delay'])
     
     def run(self):

@@ -364,6 +364,15 @@ class ClientDetailTab(QWidget):
             if initial_command:
                 # Wait a bit for the session to start before sending the first command
                 asyncio.get_event_loop().call_later(0.5, lambda: self.execute_command(initial_command))
+
+    def stop_interactive_session(self):
+        """Stops the interactive terminal session.""" 
+        if self.interactive_session:
+            self.log_message_requested.emit("Остановка интерактивной сессии...")
+            asyncio.run_coroutine_threadsafe(
+                self.ws_server.send_command(self.client_id, "interactive:stop"),
+                self.ws_server.loop
+            )
     
     def add_custom_command(self):
         """Добавление новой кастомной команды"""

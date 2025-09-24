@@ -727,8 +727,7 @@ class ServerGUI(QMainWindow):
         if client_id in self.client_tabs:
             index = self.tabs.indexOf(self.client_tabs[client_id])
             if index != -1:
-                self.tabs.removeTab(index)
-            del self.client_tabs[client_id]
+                self.close_tab(index)
         
         self.update_clients_count()
         
@@ -1309,6 +1308,9 @@ class ServerGUI(QMainWindow):
             # Для системных вкладок - просто удаляем из QTabWidget, не удаляя сам виджет
             self.tabs.removeTab(index)
             return
+
+        # Останавливаем интерактивную сессию перед закрытием вкладки
+        widget.stop_interactive_session()
 
         # Для вкладок клиентов - логика с полным удалением
         client_id_to_remove = None

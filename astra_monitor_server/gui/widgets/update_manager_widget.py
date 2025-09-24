@@ -131,7 +131,7 @@ class UpdateManagerWidget(QWidget):
     def install_all_updates(self):
         reply = QMessageBox.question(self, "❓ Подтверждение", "Вы уверены, что хотите обновить всю систему?", QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
-            self.run_in_terminal_requested.emit("sudo apt-get upgrade -y --enable-upgrade")
+            self.run_in_terminal_requested.emit("sudo apt update && sudo apt-get dist-upgrade")
             QMessageBox.information(self, "ℹ️ Информация", "Запущено полное обновление системы.\nПосле завершения, нажмите 'Шаг 2', чтобы обновить список.")
 
     def display_repo_content(self, filename):
