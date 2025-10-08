@@ -509,6 +509,13 @@ rem Self-destruct
                 pid, fd = pty.fork()
                 if pid == 0:  # Child
                     try:
+                        # ОЧИСТКА ОКРУЖЕНИЯ ПЕРЕД ЗАПУСКОМ КОМАНДЫ
+                        os.environ.pop('LD_LIBRARY_PATH', None)
+                        os.environ.pop('PYTHONPATH', None)
+                        os.environ.pop('PYINSTALLER_CONFIG_DIR', None)
+                        
+                        # Устанавливаем чистое окружение
+                        os.environ['LD_LIBRARY_PATH'] = ''
                         args = cmd.split()
                         os.execvp(args[0], args)
                     except Exception as e:
@@ -799,95 +806,6 @@ rem Self-destruct
             ctypes.windll.user32.MessageBoxW(0, message, "Сообщение от администратора", 0)
             return {"message_result": "success"}
         else:
-            def _find_active_session():
-                """Находит активную графическую сессию и пользователя."""
-                try:
-                    p = subprocess.run(['who'], capture_output=True, text=True, check=True)
-                    for line in p.stdout.strip().split('\n'):
-                        if ':0' in line or ':1' in line or '(:' in line:
-                            parts = line.split()
-                            user = parts[0]
-                            display = ':0'
-                            
-                            for part in parts:
-                                if part.startswith('(:') or (part.startswith(':') and len(part) > 1):
-                                    display = part.strip('()')
-                                    break
-                            
-                            try:
-                                uid_proc = subprocess.run(['id', '-u', user], capture_output=True, text=True)
-                                if uid_proc.returncode == 0:
-                                    uid = uid_proc.stdout.strip()
-                                    return user, display, uid
-                            except:
-                                continue
-                except Exception:
-                    pass
-                
-                return None, None, None
-
-            if not shutil.which('notify-send'):
-                return {"message_result": "error", "error": "❌ Команда 'notify-send' не найдена. Установите пакет 'libnotify-bin'."}
-
-            try:
-                user, display, uid = _find_active_session()
-                if not (user and display and uid):
-                    return {"error": "❌ Не найдено активной графической сессии"}
-
-                # Попытка 1: с DBUS_SESSION_BUS_ADDRESS
-                command1 = [
-                    'sudo', '-u', user,
-                    'env', f'DISPLAY={display}', f'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus',
-                    '/usr/bin/notify-send', '--icon=dialog-information', 'Сообщение от администратора', message
-                ]
-                proc1 = subprocess.run(command1, capture_output=True, text=True, timeout=5)
-
-                if proc1.returncode == 0:
-                    logging.info("Уведомление успешно отправлено (метод 1)")
-                    return {"message_result": "success", "info": f"✅ Сообщение отправлено пользователю {user}"}
-                
-                logging.warning(f"Не удалось отправить уведомление (метод 1): {proc1.stderr.strip()}")
-
-                # Попытка 2: без DBUS_SESSION_BUS_ADDRESS
-                command2 = [
-                    'sudo', '-u', user,
-                    'env', f'DISPLAY={display}',
-                    '/usr/bin/notify-send', '--icon=dialog-information', 'Сообщение от администратора', message
-                ]
-                proc2 = subprocess.run(command2, capture_output=True, text=True, timeout=5)
-
-                if proc2.returncode == 0:
-                    logging.info("Уведомление успешно отправлено (метод 2)")
-                    return {"message_result": "success", "info": f"✅ Сообщение отправлено пользователю {user}"}
-                
-                logging.error(f"Не удалось отправить уведомление (метод 2): {proc2.stderr.strip()}")
-                return {"message_result": "error", "error": f"Не удалось отправить уведомление. Ошибка 1: {proc1.stderr.strip()}; Ошибка 2: {proc2.stderr.strip()}"}
-
-            except Exception as e:
-                return {"message_result": "error", "error": f"❌ Критическая ошибка при отправке уведомления: {str(e)}"}
-
-    async def take_screenshot(self, force_quality=None):
-        if platform.system() == "Windows":
-            try:
-                import pyautogui
-            except ImportError:
-                return {"error": "PyAutoGUI library not installed"}
-            try:
-                screenshot = pyautogui.screenshot()
-                import io
-                buf = io.BytesIO()
-                quality = force_quality if force_quality is not None else self.client.screenshot_settings.get("quality", 85)
-                screenshot.save(buf, format='JPEG', quality=quality)
-                img_data = buf.getvalue()
-                return {
-                    "screenshot": base64.b64encode(img_data).decode(),
-                    "quality": quality,
-                    "timestamp": datetime.now().isoformat()
-                }
-            except Exception as e:
-                return {"error": f"❌ Ошибка: {str(e)}"}
-        else:
-            logging.info("📸 Попытка создания скриншота...")
             
             def _find_active_session():
                 """Находит активную графическую сессию и пользователя."""
@@ -916,153 +834,478 @@ rem Self-destruct
                 
                 return None, None, None
 
+            def _get_dbus_address(user, uid):
+                """Получает актуальный D-BUS адрес для пользователя."""
+                methods = [
+                    # Метод 1: стандартный путь в /run/user/{uid}/bus (самый надежный)
+                    lambda: f'unix:path=/run/user/{uid}/bus',
+                    # Метод 2: из активных процессов пользователя
+                    lambda: _get_dbus_from_processes(user),
+                    # Метод 3: через переменную окружения текущей сессии
+                    lambda: _get_dbus_from_current_session(user),
+                    # Метод 4: из файла .dbus/session-bus (последний созданный) - НАИМЕНЕЕ надежный
+                    lambda: _get_dbus_from_session_file(user),
+                ]
+                
+                for method in methods:
+                    try:
+                        dbus_addr = method()
+                        if dbus_addr:
+                            logging.info(f"🔍 Проверяем D-BUS адрес: {dbus_addr}")
+                            if _test_dbus_address(dbus_addr, user):
+                                logging.info(f"✅ Используется РАБОЧИЙ D-BUS адрес: {dbus_addr}")
+                                return dbus_addr
+                            else:
+                                logging.warning(f"❌ D-BUS адрес нерабочий: {dbus_addr}")
+                    except Exception as e:
+                        logging.debug(f"Метод не сработал: {e}")
+                        continue
+                
+                logging.warning("⚠️ Не найден рабочий D-BUS адрес, будет использован автодетект")
+                return None
+
+            def _get_dbus_from_processes(user):
+                """Получает D-BUS адрес из активных процессов пользователя."""
+                # Сначала ищем в любых процессах пользователя
+                try:
+                    # Команда для поиска всех процессов пользователя и их переменных D-BUS
+                    cmd = ['pgrep', '-u', user]
+                    pgrep_result = subprocess.run(cmd, capture_output=True, text=True)
+                    
+                    if pgrep_result.returncode == 0:
+                        pids = pgrep_result.stdout.strip().split('\n')
+                        for pid in pids:
+                            if pid.strip():
+                                try:
+                                    # Читаем environ процесса
+                                    with open(f'/proc/{pid.strip()}/environ', 'rb') as f:
+                                        env_data = f.read()
+                                    # Разбираем переменные окружения
+                                    for env_var in env_data.split(b'\x00'):
+                                        try:
+                                            env_str = env_var.decode('utf-8', errors='ignore')
+                                            if env_str.startswith('DBUS_SESSION_BUS_ADDRESS='):
+                                                dbus_addr = env_str.split('=', 1)[1]
+                                                # Проверяем что это не старый /tmp адрес
+                                                if '/run/user/' in dbus_addr:
+                                                    logging.info(f"Найден актуальный D-BUS из процесса {pid}: {dbus_addr}")
+                                                    return dbus_addr
+                                        except:
+                                            continue
+                                except:
+                                    continue
+                except:
+                    pass
+                
+                return None
+
+            def _get_dbus_from_current_session(user):
+                """Пытается получить D-BUS из текущей сессии пользователя."""
+                try:
+                    # Пробуем выполнить команду как пользователь и получить актуальный D-BUS
+                    cmd = ['runuser', '-u', user, '--', 'bash', '-c', 'echo $DBUS_SESSION_BUS_ADDRESS']
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+                    if result.returncode == 0 and result.stdout.strip():
+                        dbus_addr = result.stdout.strip()
+                        if dbus_addr and not dbus_addr.isspace():
+                            logging.info(f"Найден D-BUS из текущей сессии: {dbus_addr}")
+                            return dbus_addr
+                except:
+                    pass
+                return None
+
+            def _get_dbus_from_session_file(user):
+                """Получает D-BUS адрес из файла сессии (используем только если содержит /run/user/)."""
+                try:
+                    import glob
+                    dbus_pattern = f'/home/{user}/.dbus/session-bus/*-0'
+                    dbus_files = glob.glob(dbus_pattern)
+                    
+                    if dbus_files:
+                        # Берем самый новый файл
+                        newest_file = max(dbus_files, key=os.path.getmtime)
+                        with open(newest_file, 'r') as f:
+                            content = f.read()
+                            for line in content.split('\n'):
+                                if line.startswith('DBUS_SESSION_BUS_ADDRESS='):
+                                    dbus_addr = line.split('=', 1)[1].strip().strip("'")
+                                    # Используем только если это актуальный путь /run/user/
+                                    if '/run/user/' in dbus_addr:
+                                        logging.info(f"Найден актуальный D-BUS из файла: {dbus_addr}")
+                                        return dbus_addr
+                                    else:
+                                        logging.warning(f"Пропускаем устаревший D-BUS из файла: {dbus_addr}")
+                except:
+                    pass
+                return None
+
+            def _test_dbus_address(dbus_addr, user):
+                """Проверяет, рабочий ли D-BUS адрес."""
+                try:
+                    test_cmd = [
+                        'runuser', '-u', user, '--', 'dbus-send', '--session',
+                        '--dest=org.freedesktop.DBus', '/org/freedesktop/DBus',
+                        'org.freedesktop.DBus.ListNames', '--print-reply', '--timeout=1000'
+                    ]
+                    result = subprocess.run(
+                        test_cmd, 
+                        capture_output=True, 
+                        text=True, 
+                        timeout=2,
+                        env={'DBUS_SESSION_BUS_ADDRESS': dbus_addr}
+                    )
+                    return result.returncode == 0
+                except:
+                    return False
+
+            if not shutil.which('notify-send'):
+                return {"message_result": "error", "error": "❌ Команда 'notify-send' не найдена."}
+
+            try:
+                user, display, uid = _find_active_session()
+                if not (user and display and uid):
+                    return {"error": "❌ Не найдено активной графической сессии"}
+
+                # Получаем актуальный РАБОЧИЙ D-BUS адрес
+                dbus_address = _get_dbus_address(user, uid)
+                
+                def run_as_user_with_dbus(user, display, uid, dbus_addr, cmd, timeout=5):
+                    """Запуск команды от имени пользователя с D-BUS"""
+                    try:
+                        full_cmd = ['runuser', '-u', user, '--'] + cmd
+                        
+                        env = os.environ.copy()
+                        env['DISPLAY'] = display
+                        env['HOME'] = f'/home/{user}'
+                        env['XAUTHORITY'] = f'/home/{user}/.Xauthority'
+                        
+                        # Устанавливаем D-BUS адрес только если он рабочий
+                        if dbus_addr:
+                            env['DBUS_SESSION_BUS_ADDRESS'] = dbus_addr
+                        
+                        # Очищаем проблемные переменные
+                        env.pop('LD_LIBRARY_PATH', None)
+                        
+                        result = subprocess.run(
+                            full_cmd, 
+                            env=env,
+                            timeout=timeout,
+                            capture_output=True,
+                            text=True
+                        )
+                        return result
+                    except Exception as e:
+                        logging.error(f"Ошибка runuser: {e}")
+                        return None
+
+                # Попытка 1: с проверенным D-BUS адресом
+                command = [
+                    '/usr/bin/notify-send', '--icon=dialog-information', 
+                    'Сообщение от администратора', message
+                ]
+                
+                result = run_as_user_with_dbus(user, display, uid, dbus_address, command, timeout=5)
+
+                if result and result.returncode == 0:
+                    logging.info("Уведомление успешно отправлено")
+                    return {"message_result": "success", "info": f"✅ Сообщение отправлено пользователю {user}"}
+                
+                # Если не сработало, пробуем без D-BUS (автодетект системой)
+                if result:
+                    logging.warning(f"С D-BUS не сработало: {result.stderr.strip()}")
+                
+                # Попытка 2: без указания D-BUS (система сама найдет)
+                result2 = run_as_user_with_dbus(user, display, uid, None, command, timeout=5)
+                
+                if result2 and result2.returncode == 0:
+                    logging.info("Уведомление успешно отправлено (без D-BUS)")
+                    return {"message_result": "success", "info": f"✅ Сообщение отправлено пользователю {user}"}
+
+                return {
+                    "message_result": "error", 
+                    "error": f"❌ Не удалось отправить уведомление пользователю {user}."
+                }
+
+            except Exception as e:
+                return {"message_result": "error", "error": f"❌ Критическая ошибка: {str(e)}"}
+
+
+    async def take_screenshot(self, force_quality=None):
+        if platform.system() == "Windows":
+            try:
+                import pyautogui
+            except ImportError:
+                return {"error": "PyAutoGUI library not installed"}
+            try:
+                screenshot = pyautogui.screenshot()
+                import io
+                buf = io.BytesIO()
+                quality = force_quality if force_quality is not None else self.client.screenshot_settings.get("quality", 85)
+                screenshot.save(buf, format='JPEG', quality=quality)
+                img_data = buf.getvalue()
+                return {
+                    "screenshot": base64.b64encode(img_data).decode(),
+                    "quality": quality,
+                    "timestamp": datetime.now().isoformat()
+                }
+            except Exception as e:
+                return {"error": f"❌ Ошибка: {str(e)}"}
+        else:
+            logging.info("📸 Попытка создания скриншота...")
+
+            def _find_active_session():
+                """Находит активную графическую сессию и пользователя."""
+                # Сначала пробуем новый метод для Astra 1.8
+                try:
+                    p = subprocess.run(['loginctl', 'list-sessions'], capture_output=True, text=True)
+                    for line in p.stdout.split('\n'):
+                        if 'seat0' in line or 'graphical' in line:
+                            parts = line.split()
+                            if len(parts) >= 3:
+                                session_id = parts[0]
+                                user = parts[2]
+                                
+                                info_cmd = ['loginctl', 'show-session', session_id, '-p', 'Display', '-p', 'User', '-p', 'Active']
+                                info = subprocess.run(info_cmd, capture_output=True, text=True)
+                                if 'yes' in info.stdout:
+                                    for info_line in info.stdout.split('\n'):
+                                        if 'Display=' in info_line:
+                                            display = info_line.split('=')[1]
+                                        if 'User=' in info_line:
+                                            uid = info_line.split('=')[1]
+                                    if display and uid:
+                                        return user, display, uid
+                except Exception as e:
+                    logging.warning(f"Ошибка поиска сессии через loginctl: {e}")
+
+                # Старый метод для Astra 1.7 и fallback
+                try:
+                    p = subprocess.run(['who'], capture_output=True, text=True, check=True)
+                    for line in p.stdout.strip().split('\n'):
+                        if ':0' in line or ':1' in line or '(:' in line:
+                            parts = line.split()
+                            user = parts[0]
+                            display = ':0'
+                            
+                            for part in parts:
+                                if part.startswith('(:') or (part.startswith(':') and len(part) > 1):
+                                    display = part.strip('()')
+                                    break
+                            
+                            try:
+                                uid_proc = subprocess.run(['id', '-u', user], capture_output=True, text=True)
+                                if uid_proc.returncode == 0:
+                                    uid = uid_proc.stdout.strip()
+                                    return user, display, uid
+                            except:
+                                continue
+                except Exception:
+                    pass
+                
+                return None, None, None
+
+            def run_as_user_astra18(user, display, uid, cmd, timeout=15, capture_output=True):
+                """Для Astra Linux 1.8 - используем runuser"""
+                try:
+                    full_cmd = ['runuser', '-u', user, '--'] + cmd
+                    
+                    env = os.environ.copy()
+                    env['DISPLAY'] = display
+                    env['XAUTHORITY'] = f'/home/{user}/.Xauthority'
+                    env['HOME'] = f'/home/{user}'
+                    env['DBUS_SESSION_BUS_ADDRESS'] = f'unix:path=/run/user/{uid}/bus'
+                    
+                    # Очищаем проблемные переменные
+                    env.pop('LD_LIBRARY_PATH', None)
+                    
+                    if capture_output:
+                        result = subprocess.run(
+                            full_cmd, 
+                            env=env,
+                            timeout=timeout,
+                            capture_output=True  # Используем только capture_output
+                        )
+                    else:
+                        result = subprocess.run(
+                            full_cmd, 
+                            env=env,
+                            timeout=timeout,
+                            capture_output=False
+                        )
+                    return result
+                except Exception as e:
+                    logging.error(f"Ошибка runuser: {e}")
+                    return None
+
+            def run_as_user_astra17(user, display, uid, cmd, timeout=15, capture_output=True):
+                """Для Astra Linux 1.7 - используем sudo"""
+                try:
+                    full_cmd = [
+                        'sudo', '-u', user,
+                        'env', f'DISPLAY={display}', f'XAUTHORITY=/home/{user}/.Xauthority',
+                        f'HOME=/home/{user}', f'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus'
+                    ] + cmd
+                    
+                    if capture_output:
+                        result = subprocess.run(
+                            full_cmd,
+                            timeout=timeout,
+                            capture_output=True  # Используем только capture_output
+                        )
+                    else:
+                        result = subprocess.run(
+                            full_cmd,
+                            timeout=timeout,
+                            capture_output=False
+                        )
+                    return result
+                except Exception as e:
+                    logging.error(f"Ошибка sudo: {e}")
+                    return None
+
+            def run_as_user_auto(user, display, uid, cmd, timeout=15, capture_output=True):
+                """Автоматически выбирает метод в зависимости от версии Astra"""
+                # Пробуем сначала runuser (Astra 1.8)
+                result = run_as_user_astra18(user, display, uid, cmd, timeout, capture_output)
+                if result is not None and (not capture_output or result.returncode == 0):
+                    return result
+                
+                # Если runuser не сработал, пробуем sudo (Astra 1.7)
+                logging.info("🔄 runuser не сработал, пробуем sudo...")
+                return run_as_user_astra17(user, display, uid, cmd, timeout, capture_output)
+
             try:
                 quality = force_quality if force_quality is not None else self.client.screenshot_settings["quality"]
                 user, display, uid = _find_active_session()
                 if not (user and display and uid):
                     return {"error": "❌ Не найдено активной графической сессии"}
 
+                # Даем доступ к X11
                 try:
-                    subprocess.run(f"xhost +SI:localuser:{user}", shell=True, timeout=5)
+                    subprocess.run(["xhost", "+SI:localuser:root"], timeout=5, capture_output=False)
+                    subprocess.run(["xhost", "+SI:localuser:" + user], timeout=5, capture_output=False)
+                    subprocess.run(["xhost", "+"], timeout=5, capture_output=False)
                 except:
                     pass
 
+                # Метод 1: import напрямую в stdout (без файлов)
                 try:
-                    temp_file_png = f"/home/{user}/tmp_screenshot.png"
-                    temp_file_jpg = f"/home/{user}/tmp_screenshot.jpg"
-
-                    import_cmd = [
-                        'sudo', '-u', user,
-                        'env', f'DISPLAY={display}', f'XAUTHORITY=/home/{user}/.Xauthority',
-                        'HOME=/home/{}'.format(user),
-                        'import', '-window', 'root', temp_file_png
-                    ]
+                    import_cmd = ['import', '-window', 'root', 'png:-']
+                    result = run_as_user_auto(user, display, uid, import_cmd, timeout=15, capture_output=True)
                     
-                    subprocess.run(import_cmd, timeout=15)
-                    
-                    if os.path.exists(temp_file_png) and os.path.getsize(temp_file_png) > 0:
-                        convert_cmd = ['convert', temp_file_png, '-quality', str(quality), temp_file_jpg]
-                        subprocess.run(convert_cmd, timeout=10)
+                    if result and result.returncode == 0 and result.stdout:
+                        img_data = result.stdout
                         
-                        if os.path.exists(temp_file_jpg) and os.path.getsize(temp_file_jpg) > 0:
-                            with open(temp_file_jpg, "rb") as f:
-                                img_data = f.read()
+                        # Если нужно сжать качество, используем convert в памяти
+                        if quality < 100:
+                            convert_cmd = ['convert', 'png:-', '-quality', str(quality), 'jpg:-']
+                            convert_result = run_as_user_auto(user, display, uid, convert_cmd, timeout=10, capture_output=True)
                             
-                            os.unlink(temp_file_png)
-                            os.unlink(temp_file_jpg)
+                            if convert_result and convert_result.returncode == 0 and convert_result.stdout:
+                                img_data = convert_result.stdout
+                        
+                        return {
+                            "screenshot": base64.b64encode(img_data).decode(),
+                            "quality": quality,
+                            "timestamp": datetime.now().isoformat()
+                        }
+                except Exception as e:
+                    logging.warning(f"Метод скриншота (import в память) не удался: {e}")
+
+                # Метод 2: xwd в stdout
+                try:
+                    xwd_cmd = ['xwd', '-root', '-silent']
+                    result = run_as_user_auto(user, display, uid, xwd_cmd, timeout=15, capture_output=True)
+                    
+                    if result and result.returncode == 0 and result.stdout:
+                        # Конвертируем xwd в png в памяти
+                        convert_cmd = ['convert', 'xwd:-', 'png:-']
+                        convert_result = run_as_user_auto(user, display, uid, convert_cmd, timeout=10, capture_output=True)
+                        
+                        if convert_result and convert_result.returncode == 0 and convert_result.stdout:
+                            img_data = convert_result.stdout
+                            return {
+                                "screenshot": base64.b64encode(img_data).decode(),
+                                "quality": quality,
+                                "timestamp": datetime.now().isoformat()
+                            }
+                            
+                except Exception as e:
+                    logging.warning(f"Метод скриншота (xwd в память) не удался: {e}")
+
+                # Метод 3: ffmpeg в stdout (самый эффективный)
+                if shutil.which("ffmpeg"):
+                    try:
+                        ffmpeg_cmd = [
+                            'ffmpeg', '-f', 'x11grab', '-video_size', '1920x1080', '-i', display,
+                            '-vframes', '1', '-q:v', str(max(1, 31 - quality // 3)), 
+                            '-f', 'image2pipe', '-c:v', 'mjpeg', '-'
+                        ]
+                        
+                        result = run_as_user_auto(user, display, uid, ffmpeg_cmd, timeout=15, capture_output=True)
+                        
+                        if result and result.returncode == 0 and result.stdout:
+                            img_data = result.stdout
+                            return {
+                                "screenshot": base64.b64encode(img_data).decode(),
+                                "quality": quality,
+                                "timestamp": datetime.now().isoformat()
+                            }
+                            
+                    except Exception as e:
+                        logging.warning(f"Метод скриншота (ffmpeg в память) не удался: {e}")
+
+                # Метод 4: scrot в stdout (если установлен)
+                if shutil.which("scrot"):
+                    try:
+                        scrot_cmd = ['scrot', '-o', '-']
+                        result = run_as_user_auto(user, display, uid, scrot_cmd, timeout=10, capture_output=True)
+                        
+                        if result and result.returncode == 0 and result.stdout:
+                            img_data = result.stdout
+                            
+                            # Сжимаем если нужно
+                            if quality < 100:
+                                convert_cmd = ['convert', 'png:-', '-quality', str(quality), 'jpg:-']
+                                convert_result = run_as_user_auto(user, display, uid, convert_cmd, timeout=5, capture_output=True)
+                                
+                                if convert_result and convert_result.returncode == 0 and convert_result.stdout:
+                                    img_data = convert_result.stdout
                             
                             return {
                                 "screenshot": base64.b64encode(img_data).decode(),
                                 "quality": quality,
                                 "timestamp": datetime.now().isoformat()
                             }
-                        
-                except Exception:
-                    logging.warning("Метод скриншота (import+convert) не удался.", exc_info=True)
-                    for f in [temp_file_png, temp_file_jpg]:
-                        try:
-                            if os.path.exists(f):
-                                os.unlink(f)
-                        except:
-                            pass
+                            
+                    except Exception as e:
+                        logging.warning(f"Метод скриншота (scrot) не удался: {e}")
 
+                # Метод 5: gnome-screenshot в stdout (для GNOME)
                 try:
-                    xwd_file = f"/home/{user}/tmp_screenshot.xwd"
-                    png_file = f"/home/{user}/tmp_screenshot.png"
-
-                    xwd_cmd = [
-                        'sudo', '-u', user,
-                        'env', f'DISPLAY={display}', f'XAUTHORITY=/home/{user}/.Xauthority',
-                        'HOME=/home/{}'.format(user),
-                        'xwd', '-root', '-out', xwd_file
-                    ]
+                    gnome_cmd = ['gnome-screenshot', '-f', '-', '--include-pointer']
+                    result = run_as_user_auto(user, display, uid, gnome_cmd, timeout=10, capture_output=True)
                     
-                    subprocess.run(xwd_cmd, timeout=15)
-                    
-                    if os.path.exists(xwd_file) and os.path.getsize(xwd_file) > 0:
-                        convert_cmd = ['convert', xwd_file, png_file]
-                        subprocess.run(convert_cmd, timeout=10)
+                    if result and result.returncode == 0 and result.stdout:
+                        img_data = result.stdout
                         
-                        if os.path.exists(png_file) and os.path.getsize(png_file) > 0:
-                            with open(png_file, "rb") as f:
-                                img_data = f.read()
+                        if quality < 100:
+                            convert_cmd = ['convert', 'png:-', '-quality', str(quality), 'jpg:-']
+                            convert_result = run_as_user_auto(user, display, uid, convert_cmd, timeout=5, capture_output=True)
                             
-                            os.unlink(xwd_file)
-                            os.unlink(png_file)
-                            return {"screenshot": base64.b64encode(img_data).decode()}
-                    
-                except Exception:
-                    logging.warning("Метод скриншота (xwd) не удался.", exc_info=True)
-                    for f in [xwd_file, png_file]:
-                        try:
-                            if os.path.exists(f):
-                                os.unlink(f)
-                        except:
-                            pass
-
-                try:
-                    temp_file = f"/home/{user}/tmp_screenshot.jpg"
-
-                    dbus_cmd = [
-                        'sudo', '-u', user,
-                        'env', f'DISPLAY={display}', f'XAUTHORITY=/home/{user}/.Xauthority',
-                        'HOME=/home/{}'.format(user), 'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{}/bus'.format(uid),
-                        'dbus-send', '--session', '--print-reply', '--dest=org.freedesktop.portal.Desktop',
-                        '/org/freedesktop/portal/desktop', 'org.freedesktop.portal.Screenshot.Screenshot',
-                        'string:""', 'dict:string:string:"handle_token","test"'
-                    ]
-                    
-                    result = subprocess.run(dbus_cmd, capture_output=True, text=True, timeout=15)
-                    
-                    if result.returncode == 0:
-                        time.sleep(2)
+                            if convert_result and convert_result.returncode == 0 and convert_result.stdout:
+                                img_data = convert_result.stdout
                         
-                        possible_paths = [
-                            f'/home/{user}/Изображения/Screenshot.png',
-                            f'/home/{user}/Картинки/Screenshot.png',
-                            f'/home/{user}/Pictures/Screenshot.png',
-                            f'/home/{user}/Загрузки/Screenshot.png'
-                        ]
-                        
-                        for path in possible_paths:
-                            if os.path.exists(path):
-                                with open(path, "rb") as f:
-                                    img_data = f.read()
-                                os.unlink(path)
-                                return {"screenshot": base64.b64encode(img_data).decode()}
-                                
-                except Exception:
-                    logging.warning("Метод скриншота (dbus) не удался.", exc_info=True)
+                        return {
+                            "screenshot": base64.b64encode(img_data).decode(),
+                            "quality": quality,
+                            "timestamp": datetime.now().isoformat()
+                        }
+                except Exception as e:
+                    logging.warning(f"Метод скриншота (gnome-screenshot) не удался: {e}")
 
-                if shutil.which("ffmpeg"):
-                    try:
-                        temp_file = f"/home/{user}/tmp_screenshot.jpg"
+                return {"error": "❌ Все методы создания скриншота не удались"}
 
-                        ffmpeg_cmd = [
-                            'sudo', '-u', user,
-                            'env', f'DISPLAY={display}', f'XAUTHORITY=/home/{user}/.Xauthority',
-                            'HOME=/home/{}'.format(user),
-                            'ffmpeg', '-f', 'x11grab', '-video_size', '1024x768', '-i', display,
-                            '-vframes', '1', '-q:v', '2', temp_file, '-y', '-loglevel', 'quiet'
-                        ]
-                        
-                        subprocess.run(ffmpeg_cmd, timeout=15)
-                        
-                        if os.path.exists(temp_file) and os.path.getsize(temp_file) > 0:
-                            with open(temp_file, "rb") as f:
-                                img_data = f.read()
-                            
-                            os.unlink(temp_file)
-                            return {"screenshot": base64.b64encode(img_data).decode()}
-                            
-                    except Exception:
-                        logging.warning("Метод скриншота (ffmpeg) не удался.", exc_info=True)
-
-                return {"error": "❌ Не удалось сделать скриншот"}
-
-            except subprocess.TimeoutExpired:
-                logging.error("⌛ Таймаут создания скриншота")
-                return {"error": "⌛ Таймаут создания скриншота"}
             except Exception as e:
-                logging.exception("❌ Критическая ошибка при создании скриншота.")
-                return {"error": f"❌ Ошибка: {str(e)}"}
+                logging.error(f"Критическая ошибка создания скриншота: {e}")
+                return {"error": f"❌ Ошибка создания скриншота: {str(e)}"}
