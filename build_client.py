@@ -56,6 +56,12 @@ def build_standalone(build_config=None):
     options = [
         "--name=astra-monitor-client",
         "--onefile",
+        "--console",
+        # КРИТИЧЕСКИ ВАЖНЫЕ ПАРАМЕТРЫ ДЛЯ ПРЕДОТВРАЩЕНИЯ КОНФЛИКТОВ:
+        "--clean",  # Очистка временных файлов
+        "--noconfirm",  # Без подтверждения
+        "--strip",  # Удаление отладочной информации
+        "--noupx",  # Отключение UPX (часто вызывает проблемы)
     ]
 
     if sys.platform == "win32":
@@ -63,12 +69,25 @@ def build_standalone(build_config=None):
     else:
         options.append("--console")
 
+    # Явно исключаем системные библиотеки
+    options.extend([
+        "--exclude-module=libstdc++",
+        "--exclude-module=libselinux",
+        "--exclude-module=libapt-pkg",
+    ])
+
     options.extend([
         "--hidden-import=websockets",
         "--hidden-import=pyautogui",
         "--hidden-import=psutil",
         "--hidden-import=pkg_resources.py2_warn", # Для совместимости
     ])
+
+    # ДОБАВЬТЕ ЭТОТ БЛОК ДЛЯ ПРЕДОТВРАЩЕНИЯ КОНФЛИКТОВ:
+    if sys.platform != "win32":
+        options.extend([
+            "--runtime-tmpdir=/var/tmp",  # Используем системную временную директорию
+        ])
 
     if sys.platform == "win32":
         options.extend([
@@ -173,10 +192,11 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/astra-monitor-client
+ExecStart=/bin/bash -c 'unset LD_LIBRARY_PATH; exec /usr/local/bin/astra-monitor-client'
 Restart=always
 RestartSec=5
 User=root
+Environment=LD_LIBRARY_PATH=
 
 [Install]
 WantedBy=multi-user.target
@@ -200,6 +220,7 @@ systemctl stop astra-monitor.service 2>/dev/null || true
 systemctl disable astra-monitor.service 2>/dev/null || true
 rm -f /etc/systemd/system/astra-monitor.service 2>/dev/null || true
 systemctl daemon-reload 2>/dev/null || true
+rm -rf /tmp/_MEI* 2>/dev/null || true
 """
     prerm_path = debian_dir / "prerm"
     prerm_path.write_text(prerm_content, encoding="utf-8")
