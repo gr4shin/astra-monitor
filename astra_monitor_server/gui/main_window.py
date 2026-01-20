@@ -404,7 +404,7 @@ class ServerGUI(QMainWindow):
         self.clients_tree = QTreeWidget()
         self.clients_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.clients_tree.setSortingEnabled(True)
-        self.clients_tree.setHeaderLabels(['IP адрес', 'Hostname', 'Примечание','Версия', 'CPU %', 'RAM %', 'Диск %', 'Сеть (↓/↑)', 'Статус'])
+        self.clients_tree.setHeaderLabels(['IP адрес', 'Hostname', 'Примечание','Версия', 'CPU', 'RAM', 'Диск', 'Сеть (↓/↑)', 'Статус'])
         self.clients_tree.header().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.clients_tree.itemDoubleClicked.connect(self.open_client_tab_from_double_click)
         self.clients_tree.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -1114,8 +1114,8 @@ class ServerGUI(QMainWindow):
 
         data = self.client_data[client_id]
         hostname = data.get('hostname', 'N/A')
-        cpu = data.get('cpu_percent', 0)
-        mem = data.get('memory_percent', 0)
+        cpu = round(data.get('cpu_percent', 0))
+        mem = round(data.get('memory_percent', 0))
         status = data.get('status', 'Unknown')
         
         # --- Обновляем элемент дерева ---
@@ -1123,9 +1123,9 @@ class ServerGUI(QMainWindow):
         tree_item.setText(1, hostname)
         tree_item.setText(2, data.get('settings',{}).get('info_text',''))
         tree_item.setText(3, data.get('version', 'N/A'))
-        tree_item.setText(4, f"{cpu:.1f}")
-        tree_item.setText(5, f"{mem:.1f}")
-        tree_item.setText(6, f"{data.get('disk_percent', 0):.1f}")
+        tree_item.setText(4, f"{cpu}%")
+        tree_item.setText(5, f"{mem}%")
+        tree_item.setText(6, f"{round(data.get('disk_percent', 0))}%")
         
         recv = data.get('bytes_recv_speed', 0) / 1024
         sent = data.get('bytes_sent_speed', 0) / 1024
@@ -1138,13 +1138,14 @@ class ServerGUI(QMainWindow):
             # Сбрасываем цвет на дефолтный
             for i in range(tree_item.columnCount()):
                 tree_item.setData(i, Qt.ForegroundRole, QVariant())
-            tree_item.setForeground(7, QBrush(QColor("green")))
+            tree_item.setForeground(8, QBrush(QColor("green")))
+            
             grid_item.setData(Qt.ForegroundRole, QVariant())
             # Включаем элемент
             grid_item.setFlags(grid_item.flags() | Qt.ItemIsEnabled)
             tree_item.setFlags(tree_item.flags() | Qt.ItemIsEnabled)
             # Обновляем текст в сетке
-            grid_item.setText(f"{hostname} {data.get('settings',{}).get('info_text','')}\nCPU: {cpu:.1f}% | RAM: {mem:.1f}%")
+            grid_item.setText(f"{hostname} {data.get('settings',{}).get('info_text','')}\nCPU: {cpu}% | RAM: {mem}%")
             # Если иконки нет (например, после переподключения), ставим заглушку, чтобы зарезервировать место
             if grid_item.icon().isNull():
                 grid_item.setIcon(self.placeholder_icon)
@@ -1155,7 +1156,7 @@ class ServerGUI(QMainWindow):
             for i in range(tree_item.columnCount()):
                 tree_item.setForeground(i, gray_brush)
             grid_item.setForeground(gray_brush)
-            tree_item.setForeground(7, QBrush(QColor("red")))
+            tree_item.setForeground(8, QBrush(QColor("red")))
             # Отключаем элемент, чтобы он не был интерактивным
             grid_item.setFlags(grid_item.flags() & ~Qt.ItemIsEnabled)
             tree_item.setFlags(tree_item.flags() & ~Qt.ItemIsEnabled)
