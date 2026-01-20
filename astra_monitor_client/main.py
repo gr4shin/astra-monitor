@@ -5,7 +5,7 @@ import traceback
 import os 
 
 # --- Версия клиента ---
-CLIENT_VERSION = "2.10.08b"
+CLIENT_VERSION = "26.01.20a"
 # --------------------
 
 def setup_logging():

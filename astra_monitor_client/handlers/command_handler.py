@@ -806,9 +806,32 @@ rem Self-destruct
             ctypes.windll.user32.MessageBoxW(0, message, "Сообщение от администратора", 0)
             return {"message_result": "success"}
         else:
-            
             def _find_active_session():
                 """Находит активную графическую сессию и пользователя."""
+                # Сначала пробуем новый метод для Astra 1.8 через loginctl
+                try:
+                    p = subprocess.run(['loginctl', 'list-sessions'], capture_output=True, text=True)
+                    for line in p.stdout.split('\n'):
+                        if 'seat0' in line or 'graphical' in line:
+                            parts = line.split()
+                            if len(parts) >= 3:
+                                session_id = parts[0]
+                                user = parts[2]
+                                
+                                info_cmd = ['loginctl', 'show-session', session_id, '-p', 'Display', '-p', 'User', '-p', 'Active']
+                                info = subprocess.run(info_cmd, capture_output=True, text=True)
+                                if 'yes' in info.stdout:
+                                    for info_line in info.stdout.split('\n'):
+                                        if 'Display=' in info_line:
+                                            display = info_line.split('=')[1]
+                                        if 'User=' in info_line:
+                                            uid = info_line.split('=')[1]
+                                    if display and uid:
+                                        return user, display, uid
+                except Exception as e:
+                    logging.warning(f"Ошибка поиска сессии через loginctl: {e}")
+
+                # Старый метод для Astra 1.7 и fallback
                 try:
                     p = subprocess.run(['who'], capture_output=True, text=True, check=True)
                     for line in p.stdout.strip().split('\n'):
@@ -834,199 +857,180 @@ rem Self-destruct
                 
                 return None, None, None
 
-            def _get_dbus_address(user, uid):
-                """Получает актуальный D-BUS адрес для пользователя."""
-                methods = [
-                    # Метод 1: стандартный путь в /run/user/{uid}/bus (самый надежный)
-                    lambda: f'unix:path=/run/user/{uid}/bus',
-                    # Метод 2: из активных процессов пользователя
-                    lambda: _get_dbus_from_processes(user),
-                    # Метод 3: через переменную окружения текущей сессии
-                    lambda: _get_dbus_from_current_session(user),
-                    # Метод 4: из файла .dbus/session-bus (последний созданный) - НАИМЕНЕЕ надежный
-                    lambda: _get_dbus_from_session_file(user),
-                ]
-                
-                for method in methods:
-                    try:
-                        dbus_addr = method()
-                        if dbus_addr:
-                            logging.info(f"🔍 Проверяем D-BUS адрес: {dbus_addr}")
-                            if _test_dbus_address(dbus_addr, user):
-                                logging.info(f"✅ Используется РАБОЧИЙ D-BUS адрес: {dbus_addr}")
-                                return dbus_addr
-                            else:
-                                logging.warning(f"❌ D-BUS адрес нерабочий: {dbus_addr}")
-                    except Exception as e:
-                        logging.debug(f"Метод не сработал: {e}")
-                        continue
-                
-                logging.warning("⚠️ Не найден рабочий D-BUS адрес, будет использован автодетект")
-                return None
-
-            def _get_dbus_from_processes(user):
-                """Получает D-BUS адрес из активных процессов пользователя."""
-                # Сначала ищем в любых процессах пользователя
+            def run_as_user_astra18(user, display, uid, cmd, timeout=15, capture_output=True):
+                """Для Astra Linux 1.8 - используем runuser"""
                 try:
-                    # Команда для поиска всех процессов пользователя и их переменных D-BUS
-                    cmd = ['pgrep', '-u', user]
-                    pgrep_result = subprocess.run(cmd, capture_output=True, text=True)
+                    full_cmd = ['runuser', '-u', user, '--'] + cmd
                     
-                    if pgrep_result.returncode == 0:
-                        pids = pgrep_result.stdout.strip().split('\n')
-                        for pid in pids:
-                            if pid.strip():
-                                try:
-                                    # Читаем environ процесса
-                                    with open(f'/proc/{pid.strip()}/environ', 'rb') as f:
-                                        env_data = f.read()
-                                    # Разбираем переменные окружения
-                                    for env_var in env_data.split(b'\x00'):
-                                        try:
-                                            env_str = env_var.decode('utf-8', errors='ignore')
-                                            if env_str.startswith('DBUS_SESSION_BUS_ADDRESS='):
-                                                dbus_addr = env_str.split('=', 1)[1]
-                                                # Проверяем что это не старый /tmp адрес
-                                                if '/run/user/' in dbus_addr:
-                                                    logging.info(f"Найден актуальный D-BUS из процесса {pid}: {dbus_addr}")
-                                                    return dbus_addr
-                                        except:
-                                            continue
-                                except:
-                                    continue
-                except:
-                    pass
-                
-                return None
-
-            def _get_dbus_from_current_session(user):
-                """Пытается получить D-BUS из текущей сессии пользователя."""
-                try:
-                    # Пробуем выполнить команду как пользователь и получить актуальный D-BUS
-                    cmd = ['runuser', '-u', user, '--', 'bash', '-c', 'echo $DBUS_SESSION_BUS_ADDRESS']
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-                    if result.returncode == 0 and result.stdout.strip():
-                        dbus_addr = result.stdout.strip()
-                        if dbus_addr and not dbus_addr.isspace():
-                            logging.info(f"Найден D-BUS из текущей сессии: {dbus_addr}")
-                            return dbus_addr
-                except:
-                    pass
-                return None
-
-            def _get_dbus_from_session_file(user):
-                """Получает D-BUS адрес из файла сессии (используем только если содержит /run/user/)."""
-                try:
-                    import glob
-                    dbus_pattern = f'/home/{user}/.dbus/session-bus/*-0'
-                    dbus_files = glob.glob(dbus_pattern)
+                    env = os.environ.copy()
+                    env['DISPLAY'] = display
+                    env['XAUTHORITY'] = f'/home/{user}/.Xauthority'
+                    env['HOME'] = f'/home/{user}'
+                    env['DBUS_SESSION_BUS_ADDRESS'] = f'unix:path=/run/user/{uid}/bus'
                     
-                    if dbus_files:
-                        # Берем самый новый файл
-                        newest_file = max(dbus_files, key=os.path.getmtime)
-                        with open(newest_file, 'r') as f:
-                            content = f.read()
-                            for line in content.split('\n'):
-                                if line.startswith('DBUS_SESSION_BUS_ADDRESS='):
-                                    dbus_addr = line.split('=', 1)[1].strip().strip("'")
-                                    # Используем только если это актуальный путь /run/user/
-                                    if '/run/user/' in dbus_addr:
-                                        logging.info(f"Найден актуальный D-BUS из файла: {dbus_addr}")
-                                        return dbus_addr
-                                    else:
-                                        logging.warning(f"Пропускаем устаревший D-BUS из файла: {dbus_addr}")
-                except:
-                    pass
-                return None
+                    # Очищаем проблемные переменные
+                    env.pop('LD_LIBRARY_PATH', None)
+                    
+                    if capture_output:
+                        result = subprocess.run(
+                            full_cmd, 
+                            env=env,
+                            timeout=timeout,
+                            capture_output=True  # Используем только capture_output
+                        )
+                    else:
+                        result = subprocess.run(
+                            full_cmd, 
+                            env=env,
+                            timeout=timeout,
+                            capture_output=False
+                        )
+                    return result
+                except Exception as e:
+                    logging.error(f"Ошибка runuser: {e}")
+                    return None
 
-            def _test_dbus_address(dbus_addr, user):
-                """Проверяет, рабочий ли D-BUS адрес."""
+            def run_as_user_astra17(user, display, uid, cmd, timeout=15, capture_output=True):
+                """Для Astra Linux 1.7 - используем sudo"""
                 try:
-                    test_cmd = [
-                        'runuser', '-u', user, '--', 'dbus-send', '--session',
-                        '--dest=org.freedesktop.DBus', '/org/freedesktop/DBus',
-                        'org.freedesktop.DBus.ListNames', '--print-reply', '--timeout=1000'
-                    ]
-                    result = subprocess.run(
-                        test_cmd, 
-                        capture_output=True, 
-                        text=True, 
-                        timeout=2,
-                        env={'DBUS_SESSION_BUS_ADDRESS': dbus_addr}
-                    )
-                    return result.returncode == 0
-                except:
-                    return False
+                    full_cmd = [
+                        'sudo', '-u', user,
+                        'env', f'DISPLAY={display}', f'XAUTHORITY=/home/{user}/.Xauthority',
+                        f'HOME=/home/{user}', f'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus'
+                    ] + cmd
+                    
+                    if capture_output:
+                        result = subprocess.run(
+                            full_cmd,
+                            timeout=timeout,
+                            capture_output=True  # Используем только capture_output
+                        )
+                    else:
+                        result = subprocess.run(
+                            full_cmd,
+                            timeout=timeout,
+                            capture_output=False
+                        )
+                    return result
+                except Exception as e:
+                    logging.error(f"Ошибка sudo: {e}")
+                    return None
+
+            def run_as_user_auto(user, display, uid, cmd, timeout=15, capture_output=True):
+                """Автоматически выбирает метод в зависимости от версии Astra"""
+                # Пробуем сначала runuser (Astra 1.8)
+                result = run_as_user_astra18(user, display, uid, cmd, timeout, capture_output)
+                if result is not None and (not capture_output or result.returncode == 0):
+                    return result
+                
+                # Если runuser не сработал, пробуем sudo (Astra 1.7)
+                logging.info("🔄 runuser не сработал, пробуем sudo...")
+                return run_as_user_astra17(user, display, uid, cmd, timeout, capture_output)
 
             if not shutil.which('notify-send'):
                 return {"message_result": "error", "error": "❌ Команда 'notify-send' не найдена."}
 
             try:
+                # Даем доступ к X11 (важно для уведомлений)
+                try:
+                    subprocess.run(["xhost", "+SI:localuser:root"], timeout=5, capture_output=False)
+                    subprocess.run(["xhost", "+SI:localuser:*"], timeout=5, capture_output=False)
+                except:
+                    pass
+
                 user, display, uid = _find_active_session()
                 if not (user and display and uid):
                     return {"error": "❌ Не найдено активной графической сессии"}
 
-                # Получаем актуальный РАБОЧИЙ D-BUS адрес
-                dbus_address = _get_dbus_address(user, uid)
-                
-                def run_as_user_with_dbus(user, display, uid, dbus_addr, cmd, timeout=5):
-                    """Запуск команды от имени пользователя с D-BUS"""
+                logging.info(f"🔍 Найдена сессия: пользователь={user}, display={display}, uid={uid}")
+
+                # Пробуем несколько методов отправки уведомлений
+
+                # Метод 1: notify-send с полными параметрами
+                try:
+                    command = [
+                        'notify-send', 
+                        '--icon=dialog-information',
+                        '--urgency=normal',
+                        '--expire-time=10000',
+                        'Сообщение от администратора',
+                        message
+                    ]
+                    
+                    result = run_as_user_auto(user, display, uid, command, timeout=10, capture_output=True)
+                    
+                    if result and result.returncode == 0:
+                        logging.info("✅ Уведомление успешно отправлено через notify-send")
+                        return {
+                            "message_result": "success", 
+                            "info": f"✅ Сообщение отправлено пользователю {user}"
+                        }
+                    elif result:
+                        logging.warning(f"notify-send вернул ошибку: {result.stderr}")
+                except Exception as e:
+                    logging.warning(f"Метод 1 (notify-send) не удался: {e}")
+
+                # Метод 2: zenity (альтернатива для старых систем)
+                if shutil.which('zenity'):
                     try:
-                        full_cmd = ['runuser', '-u', user, '--'] + cmd
+                        # zenity не поддерживает длинные сообщения через командную строку
+                        short_msg = message[:200] + "..." if len(message) > 200 else message
+                        zenity_cmd = [
+                            'zenity', 
+                            '--info',
+                            '--title=Сообщение от администратора',
+                            '--text=' + short_msg,
+                            '--width=400',
+                            '--timeout=10'
+                        ]
                         
-                        env = os.environ.copy()
-                        env['DISPLAY'] = display
-                        env['HOME'] = f'/home/{user}'
-                        env['XAUTHORITY'] = f'/home/{user}/.Xauthority'
+                        result = run_as_user_auto(user, display, uid, zenity_cmd, timeout=15, capture_output=True)
                         
-                        # Устанавливаем D-BUS адрес только если он рабочий
-                        if dbus_addr:
-                            env['DBUS_SESSION_BUS_ADDRESS'] = dbus_addr
-                        
-                        # Очищаем проблемные переменные
-                        env.pop('LD_LIBRARY_PATH', None)
-                        
-                        result = subprocess.run(
-                            full_cmd, 
-                            env=env,
-                            timeout=timeout,
-                            capture_output=True,
-                            text=True
-                        )
-                        return result
+                        if result and result.returncode == 0:
+                            logging.info("✅ Уведомление успешно отправлено через zenity")
+                            return {
+                                "message_result": "success", 
+                                "info": f"✅ Сообщение отправлено пользователю {user} через zenity"
+                            }
                     except Exception as e:
-                        logging.error(f"Ошибка runuser: {e}")
-                        return None
-
-                # Попытка 1: с проверенным D-BUS адресом
-                command = [
-                    '/usr/bin/notify-send', '--icon=dialog-information', 
-                    'Сообщение от администратора', message
-                ]
-                
-                result = run_as_user_with_dbus(user, display, uid, dbus_address, command, timeout=5)
-
-                if result and result.returncode == 0:
-                    logging.info("Уведомление успешно отправлено")
-                    return {"message_result": "success", "info": f"✅ Сообщение отправлено пользователю {user}"}
-                
-                # Если не сработало, пробуем без D-BUS (автодетект системой)
-                if result:
-                    logging.warning(f"С D-BUS не сработало: {result.stderr.strip()}")
-                
-                # Попытка 2: без указания D-BUS (система сама найдет)
-                result2 = run_as_user_with_dbus(user, display, uid, None, command, timeout=5)
-                
-                if result2 and result2.returncode == 0:
-                    logging.info("Уведомление успешно отправлено (без D-BUS)")
-                    return {"message_result": "success", "info": f"✅ Сообщение отправлено пользователю {user}"}
+                        logging.warning(f"Метод 2 (zenity) не удался: {e}")
+                        
+                # Метод 4: Просто echo в терминал (последняя попытка)
+                try:
+                    # Отправляем сообщение во все терминалы пользователя
+                    try:
+                        # Ищем все терминалы пользователя
+                        who_cmd = ['w', '-h', '-s']
+                        who_result = subprocess.run(who_cmd, capture_output=True, text=True)
+                        
+                        if who_result.returncode == 0:
+                            for line in who_result.stdout.split('\n'):
+                                if user in line:
+                                    parts = line.split()
+                                    if len(parts) >= 2:
+                                        tty = parts[1]
+                                        # Отправляем сообщение в этот терминал
+                                        echo_cmd = ['echo', f"\\n📩 Сообщение от администратора:\\n{message}\\n", '>', f'/dev/{tty}']
+                                        subprocess.run(echo_cmd, shell=True, timeout=5)
+                            
+                            logging.info("✅ Сообщение отправлено в терминалы пользователя")
+                            return {
+                                "message_result": "success", 
+                                "info": f"✅ Сообщение отправлено в терминалы пользователя {user}"
+                            }
+                    except:
+                        pass
+                except Exception as e:
+                    logging.warning(f"Метод 4 (echo в терминал) не удался: {e}")
 
                 return {
                     "message_result": "error", 
-                    "error": f"❌ Не удалось отправить уведомление пользователю {user}."
+                    "error": f"❌ Не удалось отправить уведомление пользователю {user}.",
+                    "details": "Попробованы все методы: notify-send, zenity, Python DBUS, echo в терминал"
                 }
 
             except Exception as e:
+                logging.error(f"Критическая ошибка отправки сообщения: {e}")
                 return {"message_result": "error", "error": f"❌ Критическая ошибка: {str(e)}"}
 
 
