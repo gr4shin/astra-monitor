@@ -364,8 +364,8 @@ class ServerGUI(QMainWindow):
         main_layout = QVBoxLayout(central_widget)
         
         # Status bar widgets
-        self.status_label = QLabel(f"🟢 Сервер запущен на ws://{APP_CONFIG['SERVER_HOST']}:{APP_CONFIG['SERVER_PORT']}")
-        self.clients_count_label = QLabel("👥 Клиентов: 0")
+        self.status_label = QLabel(f"Сервер запущен на ws://{APP_CONFIG['SERVER_HOST']}:{APP_CONFIG['SERVER_PORT']}")
+        self.clients_count_label = QLabel("Клиентов: 0")
         self.statusBar().addPermanentWidget(self.status_label)
         self.statusBar().addPermanentWidget(self.clients_count_label)
         
@@ -380,15 +380,15 @@ class ServerGUI(QMainWindow):
         clients_layout = QVBoxLayout(self.clients_list_tab)
         
         # Дерево клиентов
-        clients_group = QGroupBox("🖥️ Подключенные клиенты")
+        clients_group = QGroupBox("Подключенные клиенты")
         clients_group_layout = QVBoxLayout(clients_group)
         
         # --- Переключатель вида ---
         view_switcher_layout = QHBoxLayout()
-        self.list_view_btn = QPushButton("📜 Список")
+        self.list_view_btn = QPushButton("Список")
         self.list_view_btn.setCheckable(True)
         self.list_view_btn.setChecked(True)
-        self.grid_view_btn = QPushButton("🖼️ Сетка")
+        self.grid_view_btn = QPushButton("Сетка")
         self.grid_view_btn.setCheckable(True)
         self.list_view_btn.clicked.connect(lambda: self.switch_view(0))
         self.grid_view_btn.clicked.connect(lambda: self.switch_view(1))
@@ -404,7 +404,7 @@ class ServerGUI(QMainWindow):
         self.clients_tree = QTreeWidget()
         self.clients_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.clients_tree.setSortingEnabled(True)
-        self.clients_tree.setHeaderLabels(['IP адрес', '🖥️ Hostname', 'ℹ️ Версия', '⚙️ CPU %', '🧠 Memory %', '💾 Диск %', '📡 Сеть (↓/↑)', 'Статус'])
+        self.clients_tree.setHeaderLabels(['IP адрес', 'Hostname', 'Примечание','Версия', 'CPU %', 'RAM %', 'Диск %', 'Сеть (↓/↑)', 'Статус'])
         self.clients_tree.header().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.clients_tree.itemDoubleClicked.connect(self.open_client_tab_from_double_click)
         self.clients_tree.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -434,12 +434,12 @@ class ServerGUI(QMainWindow):
         log_layout = QVBoxLayout(self.log_view_tab)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        log_layout.addWidget(QLabel("📜 Системный лог:"))
+        log_layout.addWidget(QLabel("Системный лог:"))
         log_layout.addWidget(self.log_text)
         
         # Добавляем вкладки
-        self.tabs.addTab(self.clients_list_tab, "🖥️ Клиенты")
-        self.tabs.addTab(self.log_view_tab, "📜 Системный лог")
+        self.tabs.addTab(self.clients_list_tab, "Клиенты")
+        self.tabs.addTab(self.log_view_tab, "Системный лог")
         
         main_layout.addWidget(self.tabs)
         
@@ -680,7 +680,7 @@ class ServerGUI(QMainWindow):
 
         if old_client_id:
             # --- Клиент переподключился ---
-            logging.info(f"🔌 Клиент '{hostname or ip_address}' переподключился. Старый ID: {old_client_id}, Новый ID: {client_id}")
+            logging.info(f"Клиент '{hostname or ip_address}' переподключился. Старый ID: {old_client_id}, Новый ID: {client_id}")
 
             # 1. Переносим данные в новую запись, сохраняя настройки
             old_settings = self.client_data[old_client_id].get('settings', {})
@@ -702,7 +702,7 @@ class ServerGUI(QMainWindow):
 
         else:
             # --- Новый клиент ---
-            logging.info(f"✅ Новое подключение: {client_id} ({hostname})")
+            logging.info(f"Новое подключение: {client_id} ({hostname})")
             self.client_data[client_id] = { 'status': 'Connected', 'ip': ip_address, 'settings': {} }
             self.client_data[client_id].update(client_info)
             # Создаем для него элементы в GUI
@@ -766,12 +766,12 @@ class ServerGUI(QMainWindow):
 
     def _handle_files_list(self, client_id, data):
         path = data.get('files_list', {}).get('path', 'N/A')
-        self._log_to_client_or_system(client_id, f"📂 Получен список файлов для '{path}'")
+        self._log_to_client_or_system(client_id, f"Получен список файлов для '{path}'")
         if client_id in self.client_tabs:
             self.client_tabs[client_id].file_manager_widget.update_files_list(data['files_list'])
 
     def _handle_full_system_info(self, client_id, data):
-        self._log_to_client_or_system(client_id, "📋 Получена полная информация о системе.")
+        self._log_to_client_or_system(client_id, "Получена полная информация о системе.")
         if client_id in self.client_tabs:
             self.client_tabs[client_id].system_info_full_widget.update_info(data['full_system_info'])
 
@@ -780,7 +780,7 @@ class ServerGUI(QMainWindow):
         # Обновляем иконку в сетке
         grid_item = self.grid_items.get(client_id)
         if grid_item and self.view_stack.currentIndex() == 1:
-            logging.info(f"🖼️ Получен скриншот для сетки от {self.client_data[client_id].get('hostname', client_id)}")
+            logging.info(f"Получен скриншот для сетки от {self.client_data[client_id].get('hostname', client_id)}")
             try:
                 img_data = base64.b64decode(data['screenshot'])
                 pixmap = QPixmap()
@@ -798,18 +798,18 @@ class ServerGUI(QMainWindow):
 
     def _handle_file_upload_result(self, client_id, data):
         if data['file_upload_result'] == 'success':
-            msg = "✅ Файл успешно загружен на клиент."
+            msg = "Файл успешно загружен на клиент."
         else:
-            msg = f"❌ Ошибка загрузки файла на клиент: {data.get('error', 'Unknown error')}"
+            msg = f"Ошибка загрузки файла на клиент: {data.get('error', 'Unknown error')}"
         self._log_to_client_or_system(client_id, msg)
 
     def _handle_file_delete_result(self, client_id, data):
         if data['file_delete_result'] == 'success':
-            self._log_to_client_or_system(client_id, "✅ Файл/папка успешно удалены.")
+            self._log_to_client_or_system(client_id, "Файл/папка успешно удалены.")
             if client_id in self.client_tabs:
                 self.client_tabs[client_id].file_manager_widget.refresh_files()
         else:
-            msg = f"❌ Ошибка удаления на клиенте: {data.get('error', 'Unknown error')}"
+            msg = f"Ошибка удаления на клиенте: {data.get('error', 'Unknown error')}"
             self._log_to_client_or_system(client_id, msg)
 
     def _handle_command_result(self, client_id, data):
@@ -818,24 +818,24 @@ class ServerGUI(QMainWindow):
 
     def _handle_command_error(self, client_id, data):
         if client_id in self.client_tabs:
-            self.client_tabs[client_id].append_to_terminal(f"❌ Ошибка: {data['command_error']}")
+            self.client_tabs[client_id].append_to_terminal(f"Ошибка: {data['command_error']}")
 
     def _handle_prompt_update(self, client_id, data):
-        self._log_to_client_or_system(client_id, f"📂 Директория изменена на: {data['prompt_update']}")
+        self._log_to_client_or_system(client_id, f"Директория изменена на: {data['prompt_update']}")
         if client_id in self.client_tabs:
             self.client_tabs[client_id].update_prompt(data['prompt_update'])
 
     def _handle_client_settings(self, client_id, data):
         self.client_data[client_id]['settings'] = data['client_settings']
-        self._log_to_client_or_system(client_id, "⚙️ Получены и применены настройки от клиента.")
+        self._log_to_client_or_system(client_id, "Получены и применены настройки от клиента.")
 
     def _handle_rename_result(self, client_id, data):
         if data['rename_result'] == 'success':
-            self._log_to_client_or_system(client_id, "✅ Файл/папка успешно переименованы.")
+            self._log_to_client_or_system(client_id, "Файл/папка успешно переименованы.")
             if client_id in self.client_tabs:
                 self.client_tabs[client_id].file_manager_widget.refresh_files()
         else:
-            msg = f"❌ Ошибка переименования: {data.get('error', 'Unknown error')}"
+            msg = f"Ошибка переименования: {data.get('error', 'Unknown error')}"
             self._log_to_client_or_system(client_id, msg)
 
     def _handle_apt_repo_data(self, client_id, data):
@@ -872,12 +872,12 @@ class ServerGUI(QMainWindow):
     def _handle_message_result(self, client_id, data):
         client_ip = self.client_data[client_id].get('ip')
         if data['message_result'] == 'success':
-            msg = f"✅ Сообщение успешно показано: {data.get('info', '')}"
-            sys_msg = f"✅ Сообщение успешно показано на {client_ip}: {data.get('info', '')}"
+            msg = f"Сообщение успешно показано: {data.get('info', '')}"
+            sys_msg = f"Сообщение успешно показано на {client_ip}: {data.get('info', '')}"
             self._log_client_action(client_id, msg, sys_msg)
         else:
-            msg = f"❌ Ошибка показа сообщения: {data.get('error', 'Unknown error')}"
-            sys_msg = f"❌ Ошибка показа сообщения на {client_ip}: {data.get('error', 'Unknown error')}"
+            msg = f"Ошибка показа сообщения: {data.get('error', 'Unknown error')}"
+            sys_msg = f"Ошибка показа сообщения на {client_ip}: {data.get('error', 'Unknown error')}"
             self._log_client_action(client_id, msg, sys_msg)
 
     def _handle_interactive_started(self, client_id, data):
@@ -1117,42 +1117,45 @@ class ServerGUI(QMainWindow):
         cpu = data.get('cpu_percent', 0)
         mem = data.get('memory_percent', 0)
         status = data.get('status', 'Unknown')
-
+        
         # --- Обновляем элемент дерева ---
         tree_item.setText(0, data.get('ip', 'N/A'))
         tree_item.setText(1, hostname)
-        tree_item.setText(2, data.get('version', 'N/A'))
-        tree_item.setText(3, f"{cpu:.1f}")
-        tree_item.setText(4, f"{mem:.1f}")
-        tree_item.setText(5, f"{data.get('disk_percent', 0):.1f}")
+        tree_item.setText(2, data.get('settings',{}).get('info_text',''))
+        tree_item.setText(3, data.get('version', 'N/A'))
+        tree_item.setText(4, f"{cpu:.1f}")
+        tree_item.setText(5, f"{mem:.1f}")
+        tree_item.setText(6, f"{data.get('disk_percent', 0):.1f}")
         
         recv = data.get('bytes_recv_speed', 0) / 1024
         sent = data.get('bytes_sent_speed', 0) / 1024
-        tree_item.setText(6, f"{recv:.1f} / {sent:.1f} KB/s")
+        tree_item.setText(7, f"{recv:.1f} / {sent:.1f} KB/s")
         
         gray_brush = QBrush(Qt.gray)
 
         if status == 'Connected':
-            status_text = "🟢 Подключен"
+            status_text = "Подключен"
             # Сбрасываем цвет на дефолтный
             for i in range(tree_item.columnCount()):
                 tree_item.setData(i, Qt.ForegroundRole, QVariant())
+            tree_item.setForeground(7, QBrush(QColor("green")))
             grid_item.setData(Qt.ForegroundRole, QVariant())
             # Включаем элемент
             grid_item.setFlags(grid_item.flags() | Qt.ItemIsEnabled)
             tree_item.setFlags(tree_item.flags() | Qt.ItemIsEnabled)
             # Обновляем текст в сетке
-            grid_item.setText(f"{hostname}\nCPU: {cpu:.1f}% | RAM: {mem:.1f}%")
+            grid_item.setText(f"{hostname} {data.get('settings',{}).get('info_text','')}\nCPU: {cpu:.1f}% | RAM: {mem:.1f}%")
             # Если иконки нет (например, после переподключения), ставим заглушку, чтобы зарезервировать место
             if grid_item.icon().isNull():
                 grid_item.setIcon(self.placeholder_icon)
 
         elif status == 'Disconnected':
-            status_text = "⚪ Отключен"
+            status_text = "Отключен"
             # Устанавливаем серый цвет
             for i in range(tree_item.columnCount()):
                 tree_item.setForeground(i, gray_brush)
             grid_item.setForeground(gray_brush)
+            tree_item.setForeground(7, QBrush(QColor("red")))
             # Отключаем элемент, чтобы он не был интерактивным
             grid_item.setFlags(grid_item.flags() & ~Qt.ItemIsEnabled)
             tree_item.setFlags(tree_item.flags() & ~Qt.ItemIsEnabled)
@@ -1162,7 +1165,7 @@ class ServerGUI(QMainWindow):
         else:
             status_text = "❓ Неизвестно"
 
-        tree_item.setText(7, status_text)
+        tree_item.setText(8, status_text)
 
     def get_selected_client_ids(self):
         """Получение списка client_id выбранных клиентов."""
@@ -1179,7 +1182,7 @@ class ServerGUI(QMainWindow):
     
     def update_clients_count(self):
         count = len([cid for cid, data in self.client_data.items() if data.get('status') == 'Connected'])
-        self.clients_count_label.setText(f"👥 Клиентов: {count}")
+        self.clients_count_label.setText(f"Клиентов: {count}")
         
     def _log_client_action(self, client_id, message_for_client_log, message_for_system_log):
         """Логирует действие в лог клиента или в системный лог."""

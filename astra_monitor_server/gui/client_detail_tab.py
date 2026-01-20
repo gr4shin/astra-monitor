@@ -232,6 +232,13 @@ class ClientDetailTab(QWidget):
         self.log_sensitive_commands.setChecked(self.client_settings.get('log_sensitive_commands', True))
         security_layout.addRow(self.log_sensitive_commands)
 
+        # Группа настроек примечаний
+        info_group = QGroupBox("Примечание")
+        info_layout = QFormLayout(info_group)
+        self.info_text = QLineEdit(str(self.client_settings.get('info_text', '')))        
+        info_layout.addRow("Примечание:", self.info_text)
+
+
         # Кнопки применения настроек
         settings_buttons_layout = QHBoxLayout()
         save_settings_btn = QPushButton("💾 Сохранить настройки")
@@ -246,6 +253,7 @@ class ClientDetailTab(QWidget):
         settings_layout.addWidget(monitoring_group)
         settings_layout.addWidget(connection_group)
         settings_layout.addWidget(security_group)
+        settings_layout.addWidget(info_group)
         settings_layout.addLayout(settings_buttons_layout)
         settings_layout.addStretch()
         return settings_widget
@@ -455,6 +463,7 @@ class ClientDetailTab(QWidget):
                 'max_reconnect_attempts': int(self.max_reconnect_attempts.text()),
                 'enable_encryption': self.enable_encryption.isChecked(),
                 'log_sensitive_commands': self.log_sensitive_commands.isChecked(),
+                'info_text': str(self.info_text.text()),
                 'screenshot': {
                     'quality': self.screenshot_quality.value(),
                     'refresh_delay': self.screenshot_delay.value(),
@@ -491,6 +500,7 @@ class ClientDetailTab(QWidget):
             self.max_reconnect_attempts.setText("10")
             self.enable_encryption.setChecked(False)
             self.log_sensitive_commands.setChecked(True)
+            self.info_text.setText("")
             self.screenshot_quality.setValue(85)
             self.screenshot_delay.setValue(5)
             self.screenshot_auto.setChecked(True)

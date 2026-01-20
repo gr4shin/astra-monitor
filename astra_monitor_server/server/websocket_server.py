@@ -72,6 +72,7 @@ class WebSocketServer(QObject):
             self.clients[client_id] = websocket
             # Отправляем ID и информацию о клиенте для немедленного отображения
             client_info = data.get('client_info', {})
+            
             self.new_connection.emit(json.dumps({'client_id': client_id, 'client_info': client_info}))
             
             # Основной цикл обработки сообщений
