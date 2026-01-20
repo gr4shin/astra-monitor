@@ -24,6 +24,7 @@ class SystemMonitorClient:
         self.settings = {
             "monitoring_interval": 10,
             "reconnect_delay": 5,
+            "info_text": '',
             "screenshot": {
                 "quality": 85,
                 "refresh_delay": 5,
@@ -65,6 +66,7 @@ class SystemMonitorClient:
 
         self.REFRESH_INTERVAL = self.settings.get("monitoring_interval", 10)
         self.screenshot_settings = self.settings.get("screenshot", {})
+        self.info_text = self.settings.get("info_text", '')
 
         self.hostname = platform.node()
         self.local_ip = get_local_ip()
