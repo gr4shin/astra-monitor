@@ -6,8 +6,8 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QListWidget,
     QStackedWidget, QPushButton, QSplitter, QTextEdit,
     QLineEdit, QLabel, QMessageBox, QSpinBox, QCheckBox, QFormLayout)
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QFont, QIntValidator, QTextCursor
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+from PyQt5.QtGui import QFont, QIntValidator, QFontMetrics
 
 # Импортируем локальные модули
 from .dialogs.custom_command_dialog import CustomCommandDialog
@@ -16,11 +16,32 @@ from .widgets.system_info_full_widget import SystemInfoFullWidget
 from .widgets.file_manager_widget import FileManagerWidget
 from .widgets.update_manager_widget import UpdateManagerWidget
 from .widgets.screenshot_widget import ScreenshotWidget
+from .widgets.metrics_history_widget import MetricsHistoryWidget
+from .terminal_emulator import TerminalEmulator
+
+
+class TerminalView(QTextEdit):
+    resized = pyqtSignal(int, int)
+    keyPressed = pyqtSignal(object)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        metrics = QFontMetrics(self.font())
+        cols = max(1, self.viewport().width() // metrics.horizontalAdvance("M"))
+        rows = max(1, self.viewport().height() // metrics.height())
+        self.resized.emit(rows, cols)
+
+    def keyPressEvent(self, event):
+        self.keyPressed.emit(event)
+        if event.isAccepted():
+            return
+        super().keyPressEvent(event)
 
 class ClientDetailTab(QWidget):
     log_message_requested = pyqtSignal(str)
     custom_commands_updated = pyqtSignal()
     settings_changed = pyqtSignal(dict)
+    meta_changed = pyqtSignal(dict)
     append_to_log_signal = pyqtSignal(str)
 
     def __init__(self, parent=None, ws_server=None, client_id=None, client_data=None, custom_commands=None, client_settings=None, main_window=None):
@@ -29,10 +50,18 @@ class ClientDetailTab(QWidget):
         self.custom_commands = custom_commands if custom_commands is not None else {}
         self.client_id = client_id
         self.client_data = client_data or {}
-        self.os_type = self.client_data.get('os_type', 'Linux') # Default to Linux for safety
         self.client_settings = client_settings or {}
+        self.client_tags = self.client_data.get('tags', [])
         self.main_window = main_window # Store main window reference
         self.interactive_session = False
+        self.terminal_emulator = TerminalEmulator()
+        self._terminal_rows = None
+        self._terminal_cols = None
+        self._terminal_buffer = ""
+        self._terminal_flush_timer = QTimer(self)
+        self._terminal_flush_timer.setInterval(50)
+        self._terminal_flush_timer.timeout.connect(self._flush_terminal_buffer)
+        self._terminal_focus_mode = False
         self.init_ui()
         self.log_message_requested.connect(self.log_to_client)
         self.append_to_log_signal.connect(self.log_to_client)
@@ -45,7 +74,7 @@ class ClientDetailTab(QWidget):
         left_layout = QVBoxLayout(left_widget)
         left_layout.setContentsMargins(0, 0, 0, 0)
         
-        menu_group = QGroupBox("🗂️ Меню")
+        menu_group = QGroupBox("Меню")
         menu_layout = QVBoxLayout(menu_group)
         
         self.menu_list = QListWidget()
@@ -53,13 +82,14 @@ class ClientDetailTab(QWidget):
 
         # Create a map of menu item names to their corresponding widgets and visibility
         self.menu_map = {
-            "ℹ️Информация о системе": (SystemInfoFullWidget(), True),
-            "📂 Файловый менеджер": (FileManagerWidget(ws_server=self.ws_server, client_id=self.client_id, log_callback=self.append_to_log_signal.emit, main_window=self.main_window), True),
-            "⌨️ Команды": (self._create_commands_widget(), True),
-            "🔄 Управление обновлениями": (UpdateManagerWidget(ws_server=self.ws_server, client_id=self.client_id), self.os_type == 'Linux'),
-            "🖼️ Экран клиента": (ScreenshotWidget(ws_server=self.ws_server, client_id=self.client_id, log_callback=self.append_to_log_signal.emit, settings_screenshot=self.client_data.get('settings')), True),
-            "📜 Журнал клиента": (QTextEdit(), True),
-            "⚙️ Настройки": (self._create_settings_widget(), True),
+            "Информация о системе": (SystemInfoFullWidget(), True),
+            "Файловый менеджер": (FileManagerWidget(ws_server=self.ws_server, client_id=self.client_id, log_callback=self.append_to_log_signal.emit, main_window=self.main_window), True),
+            "Команды": (self._create_commands_widget(), True),
+            "Управление обновлениями": (UpdateManagerWidget(ws_server=self.ws_server, client_id=self.client_id), True),
+            "Экран клиента": (ScreenshotWidget(ws_server=self.ws_server, client_id=self.client_id, log_callback=self.append_to_log_signal.emit, settings_screenshot=self.client_data.get('settings')), True),
+            "История метрик": (MetricsHistoryWidget(), True),
+            "Журнал клиента": (QTextEdit(), True),
+            "Настройки": (self._create_settings_widget(), True),
         }
 
         self.visible_menu_items = []
@@ -70,14 +100,13 @@ class ClientDetailTab(QWidget):
                 self.visible_menu_items.append(name)
 
         # Assign widgets to instance variables for later access
-        self.system_info_full_widget = self.menu_map["ℹ️Информация о системе"][0]
-        self.file_manager_widget = self.menu_map["📂 Файловый менеджер"][0]
-        self.commands_widget = self.menu_map["⌨️ Команды"][0]
-        if self.os_type == 'Linux':
-            self.update_manager_widget = self.menu_map["🔄 Управление обновлениями"][0]
-            self.update_manager_widget.run_in_terminal_requested.connect(self.run_command_in_terminal)
-        self.screenshot_widget = self.menu_map["🖼️ Экран клиента"][0]
-        self.client_log_output = self.menu_map["📜 Журнал клиента"][0]
+        self.system_info_full_widget = self.menu_map["Информация о системе"][0]
+        self.file_manager_widget = self.menu_map["Файловый менеджер"][0]
+        self.commands_widget = self.menu_map["Команды"][0]
+        self.update_manager_widget = self.menu_map["Управление обновлениями"][0]
+        self.screenshot_widget = self.menu_map["Экран клиента"][0]
+        self.metrics_history_widget = self.menu_map["История метрик"][0]
+        self.client_log_output = self.menu_map["Журнал клиента"][0]
         self.client_log_output.setReadOnly(True)
 
         self.menu_list.currentRowChanged.connect(self.change_content)
@@ -100,13 +129,10 @@ class ClientDetailTab(QWidget):
         command_lists_layout = QHBoxLayout(command_lists_widget)
 
         # ... Быстрые команды
-        quick_commands_group = QGroupBox("⚡ Быстрые команды")
+        quick_commands_group = QGroupBox("Быстрые команды")
         quick_commands_layout = QVBoxLayout(quick_commands_group)
 
-        if self.os_type == 'Linux':
-            quick_commands = [("🧹 Очистить кэш", "sudo apt autoremove -y && sudo apt clean"), ("📊 Проверить диски", "df -h"), ("🌐 Сетевые соединения", "ss -tuln"), ("👥 Активные пользователи", "who"), ("⏰ Uptime системы", "uptime")]
-        else: # Windows
-            quick_commands = [("📦 Показать обновления", "winget upgrade"), ("⬆️ Обновить все пакеты", "winget upgrade --all --accept-source-agreements"), ("📊 Проверить диски", "wmic logicaldisk get size,freespace,caption"), ("🌐 Сетевые соединения", "netstat -an"), ("👥 Активные пользователи", "query user"), ("⏰ Uptime системы", "systeminfo | find \"System Boot Time\"")]
+        quick_commands = [("Очистить кэш", "sudo apt autoremove -y && sudo apt clean"), ("Проверить диски", "df -h"), ("Сетевые соединения", "ss -tuln"), ("Активные пользователи", "who"), ("Uptime системы", "uptime")]
 
         for name, cmd in quick_commands:
             btn = QPushButton(name)
@@ -116,7 +142,7 @@ class ClientDetailTab(QWidget):
         command_lists_layout.addWidget(quick_commands_group)
 
         # ... Пользовательские команды
-        custom_commands_group = QGroupBox("📝 Пользовательские команды")
+        custom_commands_group = QGroupBox("Пользовательские команды")
         custom_commands_layout = QVBoxLayout(custom_commands_group)
         self.custom_commands_list = QListWidget()
         self.custom_commands_list.addItems(self.custom_commands.keys())
@@ -124,19 +150,19 @@ class ClientDetailTab(QWidget):
         
         custom_buttons_layout = QHBoxLayout()
         
-        exec_btn = QPushButton("▶️ Выполнить")
+        exec_btn = QPushButton("Выполнить")
         exec_btn.setToolTip("Выполнить выбранную команду")
         exec_btn.clicked.connect(self.execute_selected_custom_command)
         
-        add_btn = QPushButton("➕ Добавить")
+        add_btn = QPushButton("Добавить")
         add_btn.setToolTip("Добавить новую команду")
         add_btn.clicked.connect(self.add_custom_command)
         
-        edit_btn = QPushButton("✏️ Редактировать")
+        edit_btn = QPushButton("Редактировать")
         edit_btn.setToolTip("Редактировать выбранную команду")
         edit_btn.clicked.connect(self.edit_custom_command)
         
-        remove_btn = QPushButton("➖ Удалить")
+        remove_btn = QPushButton("Удалить")
         remove_btn.setToolTip("Удалить выбранную команду")
         remove_btn.clicked.connect(self.remove_custom_command)
         
@@ -153,18 +179,29 @@ class ClientDetailTab(QWidget):
         splitter.addWidget(command_lists_widget)
 
         # Нижняя часть: Терминал
-        terminal_group = QGroupBox("⌨️ Терминал")
+        terminal_group = QGroupBox("Терминал")
         terminal_layout = QVBoxLayout(terminal_group)
-        self.terminal_output = QTextEdit()
+        self.terminal_output = TerminalView()
         self.terminal_output.setReadOnly(True)
         self.terminal_output.setFont(QFont("Monospace", 10))
         self.terminal_output.setStyleSheet("background-color: #2b2b2b; color: #f0f0f0;")
+        self.terminal_output.setLineWrapMode(QTextEdit.NoWrap)
+        self.terminal_output.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.terminal_output.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.terminal_output.resized.connect(self._on_terminal_resize)
+        self.terminal_output.keyPressed.connect(self._handle_terminal_key)
         
         self.terminal_input = QLineEdit()
         self.terminal_input.setFont(QFont("Monospace", 10))
         self.terminal_input.returnPressed.connect(self.execute_terminal_command)
 
+        self.focus_hint = QLabel("Фокус в терминале: F2, выход — Esc")
+        self.focus_hint.setAlignment(Qt.AlignRight)
+        self.focus_hint.setStyleSheet("color: #b0b0b0;")
+        self.focus_hint.setVisible(False)
+
         terminal_layout.addWidget(self.terminal_output)
+        terminal_layout.addWidget(self.focus_hint)
         terminal_layout.addWidget(self.terminal_input)
         splitter.addWidget(terminal_group)
         splitter.setSizes([250, 400])
@@ -177,7 +214,7 @@ class ClientDetailTab(QWidget):
         settings_layout = QVBoxLayout(settings_widget)
         
         # Скриншоты
-        screenshot_group = QGroupBox("🖼️ Настройки экрана")
+        screenshot_group = QGroupBox("Настройки экрана")
         screenshot_layout = QFormLayout(screenshot_group)
 
         self.screenshot_quality = QSpinBox()
@@ -197,7 +234,7 @@ class ClientDetailTab(QWidget):
         screenshot_layout.addRow(self.screenshot_auto)
 
         # Группа настроек мониторинга
-        monitoring_group = QGroupBox("📊 Настройки мониторинга")
+        monitoring_group = QGroupBox("Настройки мониторинга")
         monitoring_layout = QFormLayout(monitoring_group)
 
         self.monitoring_interval = QLineEdit(str(self.client_settings.get('monitoring_interval', 10)))
@@ -209,7 +246,7 @@ class ClientDetailTab(QWidget):
         monitoring_layout.addRow(self.auto_refresh)
 
         # Группа настроек соединения
-        connection_group = QGroupBox("🔌 Настройки соединения")
+        connection_group = QGroupBox("Настройки соединения")
         connection_layout = QFormLayout(connection_group)
 
         self.reconnect_delay = QLineEdit(str(self.client_settings.get('reconnect_delay', 5)))
@@ -221,7 +258,7 @@ class ClientDetailTab(QWidget):
         connection_layout.addRow("Макс. попыток переподключения:", self.max_reconnect_attempts)
 
         # Группа настроек безопасности
-        security_group = QGroupBox("🔒 Настройки безопасности")
+        security_group = QGroupBox("Настройки безопасности")
         security_layout = QFormLayout(security_group)
 
         self.enable_encryption = QCheckBox("Включить шифрование")
@@ -237,13 +274,16 @@ class ClientDetailTab(QWidget):
         info_layout = QFormLayout(info_group)
         self.info_text = QLineEdit(str(self.client_settings.get('info_text', '')))        
         info_layout.addRow("Примечание:", self.info_text)
+        self.tags_input = QLineEdit(", ".join(self.client_tags))
+        self.tags_input.setPlaceholderText("например: бухгалтерия, 1 этаж")
+        info_layout.addRow("Теги:", self.tags_input)
 
 
         # Кнопки применения настроек
         settings_buttons_layout = QHBoxLayout()
-        save_settings_btn = QPushButton("💾 Сохранить настройки")
+        save_settings_btn = QPushButton("Сохранить настройки")
         save_settings_btn.clicked.connect(self.save_settings)
-        reset_settings_btn = QPushButton("🗑️ Сбросить настройки")
+        reset_settings_btn = QPushButton("Сбросить настройки")
         reset_settings_btn.clicked.connect(self.reset_settings)
 
         settings_buttons_layout.addWidget(save_settings_btn)
@@ -271,14 +311,18 @@ class ClientDetailTab(QWidget):
         self.content_stack.setCurrentIndex(index)
         selected_item_name = self.visible_menu_items[index]
 
-        if selected_item_name == "ℹ️Информация о системе":
+        if selected_item_name == "Информация о системе":
             self.get_full_system_info()
-        elif selected_item_name == "⌨️ Команды":
+        elif selected_item_name == "Команды":
             self.start_interactive_session_if_not_running()
         
     def update_client_data(self, new_data):
         """Обновление данных клиента"""
         self.client_data.update(new_data)
+
+    def update_history(self, history):
+        if hasattr(self, "metrics_history_widget"):
+            self.metrics_history_widget.update_history(history)
 
     def log_to_client(self, message):
         """Добавление сообщения в лог клиента."""
@@ -287,24 +331,136 @@ class ClientDetailTab(QWidget):
 
     def append_to_terminal(self, text):
         """Добавление текста в окно терминала"""
-        cursor = self.terminal_output.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        self.terminal_output.setTextCursor(cursor)
-        self.terminal_output.insertPlainText(text)
-        self.terminal_output.verticalScrollBar().setValue(self.terminal_output.verticalScrollBar().maximum())
+        self._terminal_buffer += text
+        if not self._terminal_flush_timer.isActive():
+            self._terminal_flush_timer.start()
+
+    def _flush_terminal_buffer(self):
+        if not self._terminal_buffer:
+            self._terminal_flush_timer.stop()
+            return
+
+        scrollbar = self.terminal_output.verticalScrollBar()
+        at_bottom = scrollbar.value() >= scrollbar.maximum() - 2
+
+        self.terminal_emulator.feed(self._terminal_buffer)
+        self._terminal_buffer = ""
+        self.terminal_output.setUpdatesEnabled(False)
+        self.terminal_output.setHtml(self.terminal_emulator.render_html())
+        self.terminal_output.setUpdatesEnabled(True)
+        if at_bottom:
+            scrollbar.setValue(scrollbar.maximum())
+
+    def _toggle_terminal_focus(self):
+        self._terminal_focus_mode = not self._terminal_focus_mode
+        self.terminal_output.setFocus()
+        self.focus_hint.setVisible(self._terminal_focus_mode)
+        if self._terminal_focus_mode:
+            self.log_message_requested.emit("Фокус терминала включен. Выход: Esc.")
+        else:
+            self.log_message_requested.emit("Фокус терминала выключен.")
+
+    def _exit_terminal_focus(self):
+        if self._terminal_focus_mode:
+            self._terminal_focus_mode = False
+            self.focus_hint.setVisible(False)
+            self.terminal_input.setFocus()
+            self.log_message_requested.emit("Фокус терминала выключен.")
+
+    def _handle_terminal_key(self, event):
+        if event.key() == Qt.Key_F2:
+            self._toggle_terminal_focus()
+            event.accept()
+            return
+
+        if not self._terminal_focus_mode:
+            return
+
+        if event.key() == Qt.Key_Escape:
+            self._exit_terminal_focus()
+            event.accept()
+            return
+
+        seq = self._qt_key_to_ansi(event)
+        if seq:
+            asyncio.run_coroutine_threadsafe(
+                self.ws_server.send_command(self.client_id, f"interactive:input:{seq}"),
+                self.ws_server.loop
+            )
+        event.accept()
+
+    def _qt_key_to_ansi(self, event):
+        key = event.key()
+        modifiers = event.modifiers()
+
+        if key == Qt.Key_Return or key == Qt.Key_Enter:
+            return "\n"
+        if key == Qt.Key_Backspace:
+            return "\x7f"
+        if key == Qt.Key_Tab:
+            return "\t"
+
+        arrows = {
+            Qt.Key_Up: "\x1b[A",
+            Qt.Key_Down: "\x1b[B",
+            Qt.Key_Right: "\x1b[C",
+            Qt.Key_Left: "\x1b[D",
+            Qt.Key_Home: "\x1b[H",
+            Qt.Key_End: "\x1b[F",
+            Qt.Key_PageUp: "\x1b[5~",
+            Qt.Key_PageDown: "\x1b[6~",
+            Qt.Key_Insert: "\x1b[2~",
+            Qt.Key_Delete: "\x1b[3~",
+        }
+        if key in arrows:
+            return arrows[key]
+
+        if modifiers & Qt.ControlModifier:
+            if Qt.Key_A <= key <= Qt.Key_Z:
+                return chr(key - Qt.Key_A + 1)
+            if key == Qt.Key_Space:
+                return "\x00"
+            return None
+
+        text = event.text()
+        if text:
+            return text
+        return None
 
     def handle_interactive_output(self, data):
         self.append_to_terminal(data)
 
     def handle_interactive_started(self):
         self.interactive_session = True
-        self.terminal_output.clear()
+        self.terminal_emulator.reset()
+        self.terminal_output.setHtml(self.terminal_emulator.render_html())
+        self._sync_terminal_size()
         self.log_message_requested.emit(f"Интерактивная сессия запущена.")
 
     def handle_interactive_stopped(self):
         self.interactive_session = False
         self.log_message_requested.emit(f"Интерактивная сессия завершена.")
         self.append_to_terminal("\n[+] Сессия завершена. Для старта новой сессии, введите команду.\n")
+
+    def _on_terminal_resize(self, rows, cols):
+        if rows <= 0 or cols <= 0:
+            return
+        if rows == self._terminal_rows and cols == self._terminal_cols:
+            return
+        self._terminal_rows = rows
+        self._terminal_cols = cols
+        self.terminal_emulator.resize(rows, cols)
+        if self.interactive_session:
+            asyncio.run_coroutine_threadsafe(
+                self.ws_server.send_command(self.client_id, f"interactive:resize:{rows},{cols}"),
+                self.ws_server.loop
+            )
+
+    def _sync_terminal_size(self):
+        metrics = QFontMetrics(self.terminal_output.font())
+        cols = max(1, self.terminal_output.viewport().width() // metrics.horizontalAdvance("M"))
+        rows = max(1, self.terminal_output.viewport().height() // metrics.height())
+        self._on_terminal_resize(rows, cols)
 
     def update_prompt(self, path): # DEPRECATED
         pass
@@ -363,7 +519,7 @@ class ClientDetailTab(QWidget):
 
     def start_interactive_session_if_not_running(self, initial_command=None):
         if not self.interactive_session:
-            shell_cmd = "bash -i" if self.os_type == 'Linux' else "cmd.exe"
+            shell_cmd = "bash -i"
             self.log_message_requested.emit(f"Запуск интерактивной сессии ({shell_cmd})...")
             asyncio.run_coroutine_threadsafe(
                 self.ws_server.send_command(self.client_id, f"interactive:start:{shell_cmd}"),
@@ -450,7 +606,7 @@ class ClientDetailTab(QWidget):
                 if command_name in self.custom_commands:
                     del self.custom_commands[command_name]
                     self.custom_commands_list.takeItem(self.custom_commands_list.row(current_item))
-                    self.log_message_requested.emit(f"🗑️ Удалена команда: {command_name}")
+                    self.log_message_requested.emit(f"[Удаление] Команда удалена: {command_name}")
                     self.custom_commands_updated.emit()
     
     def save_settings(self):
@@ -477,8 +633,10 @@ class ClientDetailTab(QWidget):
             )
             
             self.settings_changed.emit(settings)
+            tags = [t.strip() for t in self.tags_input.text().split(",") if t.strip()]
+            self.meta_changed.emit({"tags": tags})
             client_name = self.client_data.get('hostname', self.client_id)
-            self.log_message_requested.emit(f"⚙️ Настройки отправлены клиенту {client_name}. Полностью применяться после переподключения клиента.")
+            self.log_message_requested.emit(f"Настройки отправлены клиенту {client_name}. Полностью применяться после переподключения клиента.")
             QMessageBox.information(self, "✅ Успех", "Настройки успешно отправлены клиенту! Полностью применяться после переподключения клиента.")
             
         except ValueError:
@@ -505,4 +663,4 @@ class ClientDetailTab(QWidget):
             self.screenshot_delay.setValue(5)
             self.screenshot_auto.setChecked(True)
             client_name = self.client_data.get('hostname', self.client_id)
-            self.log_message_requested.emit(f"🗑️ Настройки сброшены к значениям по умолчанию для клиента {client_name}")
+            self.log_message_requested.emit(f"[Сброс] Настройки клиента {client_name}")

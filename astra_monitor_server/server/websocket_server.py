@@ -6,6 +6,8 @@ import os
 import base64
 import websockets
 from PyQt5.QtCore import QObject, pyqtSignal
+import uuid
+import hashlib
 
 # Используем относительный импорт для доступа к config.py
 from ..config_loader import APP_CONFIG
@@ -20,6 +22,7 @@ class WebSocketServer(QObject):
         self.host = host
         self.port = port
         self.clients = {}
+        self.pending_acks = {}
         self.server = None
         self.loop = None
         self.max_size = max_size
@@ -64,16 +67,33 @@ class WebSocketServer(QObject):
                 await websocket.close(code=4002, reason="Authentication timeout")
                 return
             except json.JSONDecodeError:
-                print(f"📄 Неверный JSON от {client_id}")
+                print(f"Неверный JSON от {client_id}")
                 await websocket.close(code=4003, reason="Invalid JSON format")
                 return
             
             # Если аутентификация успешна - добавляем клиента
+            client_info = data.get('client_info', {})
+            auth_client_id = data.get('client_id')
+            if isinstance(auth_client_id, str) and auth_client_id.strip():
+                client_id = auth_client_id.strip()
+
+            if 'protocol_version' in data:
+                client_info['protocol_version'] = data.get('protocol_version')
+            if 'capabilities' in data:
+                client_info['capabilities'] = data.get('capabilities')
+
+            old_ws = self.clients.get(client_id)
+            if old_ws and old_ws.open:
+                await old_ws.close(code=4000, reason="Replaced by new connection")
+
             self.clients[client_id] = websocket
             # Отправляем ID и информацию о клиенте для немедленного отображения
-            client_info = data.get('client_info', {})
-            
-            self.new_connection.emit(json.dumps({'client_id': client_id, 'client_info': client_info}))
+            self.new_connection.emit(json.dumps({
+                'client_id': client_id,
+                'client_info': client_info,
+                'client_ip': client_ip,
+                'client_port': client_port
+            }))
             
             # Основной цикл обработки сообщений
             async for message in websocket:
@@ -83,13 +103,20 @@ class WebSocketServer(QObject):
                     data = await self.loop.run_in_executor(None, json.loads, message)
                     data['client_id'] = client_id
                     data['client_ip'] = client_ip
+                    if 'command_ack' in data:
+                        command_id = data.get('command_ack')
+                        event = self.pending_acks.get(command_id)
+                        if event:
+                            event.set()
+                            self.pending_acks.pop(command_id, None)
+                        continue
                     self.new_message.emit(data)
                 except json.JSONDecodeError:
                     error_msg = {"error": "Invalid JSON", "message": message, "client_id": client_id}
                     self.new_message.emit(error_msg)
                     
         except websockets.exceptions.ConnectionClosed:
-            print(f"📞 Соединение закрыто: {client_id}")
+            print(f"Соединение закрыто: {client_id}")
         except Exception as e:
             print(f"⚠️  Ошибка обработчика: {client_id} - {e}")
         finally:
@@ -101,11 +128,28 @@ class WebSocketServer(QObject):
         if self.loop and self.loop.is_running():
             self.loop.call_soon_threadsafe(self.loop.stop)
             
-    async def send_command(self, client_id, command):
+    async def send_command(self, client_id, command, expect_ack=False, ack_timeout=5, retries=0):
         if client_id in self.clients:
             try:
-                await self.clients[client_id].send(json.dumps({"command": command}))
-                return True
+                command_id = uuid.uuid4().hex
+                payload = {"command": command, "command_id": command_id}
+                if not expect_ack:
+                    await self.clients[client_id].send(json.dumps(payload))
+                    return True
+
+                event = asyncio.Event()
+                self.pending_acks[command_id] = event
+                for attempt in range(retries + 1):
+                    await self.clients[client_id].send(json.dumps(payload))
+                    try:
+                        await asyncio.wait_for(event.wait(), timeout=ack_timeout)
+                        return True
+                    except asyncio.TimeoutError:
+                        event.clear()
+                        if attempt == retries:
+                            break
+                self.pending_acks.pop(command_id, None)
+                return False
             except:
                 self.connection_lost.emit(client_id)
                 return False
@@ -118,15 +162,17 @@ class WebSocketServer(QObject):
             file_size = os.path.getsize(local_path)
             await self.send_command(client_id, f"upload_file_start:{remote_path}:{file_size}")
 
+            hasher = hashlib.sha256()
             with open(local_path, 'rb') as f:
                 while True:
                     chunk = f.read(4 * 1024 * 1024) # 4MB chunks
                     if not chunk:
                         break
+                    hasher.update(chunk)
                     chunk_b64 = base64.b64encode(chunk).decode('ascii')
                     await self.send_command(client_id, f"upload_file_chunk:{chunk_b64}")
             
-            await self.send_command(client_id, "upload_file_end")
+            await self.send_command(client_id, f"upload_file_end:{hasher.hexdigest()}")
             return True
         except Exception as e:
             print(f"Error uploading file: {e}")

@@ -4,15 +4,18 @@ import json
 import os
 import sys
 import logging
+import time
 import base64
 import asyncio
+import hashlib
 from threading import Thread, Lock
-from collections import defaultdict
+from collections import defaultdict, deque
 
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget,
                              QPushButton, QLabel, QTextEdit, QHeaderView, QMessageBox, QInputDialog, QFileDialog,
                              QTabWidget, QGroupBox, QAbstractItemView, QDialog, QStackedWidget, QStatusBar, QFormLayout, QSpinBox, QDialogButtonBox, QProgressDialog,
-                             QListWidget, QListView, QListWidgetItem, QMenu, QSystemTrayIcon, QApplication, QComboBox)
+                             QListWidget, QListView, QListWidgetItem, QMenu, QSystemTrayIcon, QApplication, QComboBox,
+                             QLineEdit, QCheckBox)
 from PyQt5.QtCore import pyqtSignal, Qt, QSize, QTimer, QVariant
 from PyQt5.QtGui import QPixmap, QIcon, QBrush, QColor
 from concurrent.futures import ThreadPoolExecutor
@@ -105,6 +108,14 @@ class ServerGUI(QMainWindow):
         self.grid_items = {}   # Кэш для быстрого доступа к элементам сетки по client_id
         self.download_contexts = {} # Для скачивания файлов по частям
         self.pending_downloads = {} # Для предварительно согласованных скачиваний
+        self.client_meta = {}
+        self._log_lines = []
+        self.metrics_history = defaultdict(lambda: {
+            "cpu": deque(maxlen=120),
+            "mem": deque(maxlen=120),
+            "disk": deque(maxlen=120),
+        })
+        self.scheduled_tasks = []
         self.file_processing_executor = ThreadPoolExecutor(max_workers=os.cpu_count() or 2)
         self.load_settings()
         self.apply_theme()
@@ -130,122 +141,126 @@ class ServerGUI(QMainWindow):
         """Применяет выбранную тему к приложению."""
         app = QApplication.instance()
         if self.theme == 'dark':
-            app.setStyleSheet("""
-                QWidget {
-                    background-color: #2b2b2b;
-                    color: #ffffff;
-                    border: none;
-                }
-                QGroupBox {
-                    border: 1px solid #3c3c3c;
-                    margin-top: 1em;
-                    padding-top: 0.5em;
-                }
-                QGroupBox::title {
-                    subcontrol-origin: margin;
-                    left: 10px;
-                    padding: 0 3px 0 3px;
-                }
-                QHeaderView::section {
-                    background-color: #3c3c3c;
-                    color: #ffffff;
-                    padding: 4px;
-                    border: 1px solid #2b2b2b;
-                }
-                QTabWidget::pane {
-                    border-top: 1px solid #3c3c3c;
-                }
-                QTabBar::tab {
-                    background: #2b2b2b;
-                    color: #b0b0b0;
-                    border: 1px solid #3c3c3c;
-                    border-bottom: none;
-                    padding: 8px;
-                }
-                QTabBar::tab:selected {
-                    background: #3c3c3c;
-                    color: #ffffff;
-                }
-                QTreeWidget, QListWidget {
-                    background-color: #2b2b2b;
-                    color: #ffffff;
-                    border: 1px solid #3c3c3c;
-                }
-                QPushButton {
-                    background-color: #3c3c3c;
-                    color: #ffffff;
-                    border: 1px solid #4f4f4f;
-                    padding: 5px;
-                }
-                QPushButton:hover {
-                    background-color: #4f4f4f;
-                }
-                QPushButton:pressed {
-                    background-color: #2b2b2b;
-                }
-                QTextEdit {
-                    background-color: #222222;
-                    color: #ffffff;
-                    border: 1px solid #3c3c3c;
-                }
-                QLineEdit {
-                    background-color: #222222;
-                    color: #ffffff;
-                    border: 1px solid #3c3c3c;
-                }
-                QSpinBox {
-                    background-color: #222222;
-                    color: #ffffff;
-                    border: 1px solid #3c3c3c;
-                }
-                QCheckBox::indicator {
-                    border: 1px solid #b0b0b0;
-                    background-color: #3c3c3c;
-                }
-                QCheckBox::indicator:checked {
-                    background-color: #4f4f4f;
-                }
-                QSplitter::handle {
-                    background: #3c3c3c;
-                }
-                QMenuBar {
-                    background-color: #2b2b2b;
-                    color: #ffffff;
-                }
-                QMenuBar::item {
-                    background: transparent;
-                }
-                QMenuBar::item:selected {
-                    background: #3c3c3c;
-                }
-                QMenu {
-                    background-color: #2b2b2b;
-                    color: #ffffff;
-                    border: 1px solid #4f4f4f;
-                }
-                QMenu::item:selected {
-                    background-color: #3c3c3c;
-                }
-                QStatusBar {
-                    background-color: #2b2b2b;
-                    color: #ffffff;
-                }
-                QInputDialog, QDialog, QMessageBox {
-                    background-color: #2b2b2b;
-                    color: #ffffff;
-                }
-            """)
-        else:
             app.setStyleSheet("")
+            return
+
+        app.setStyleSheet("""
+            QWidget {
+                background-color: #f4f6fb;
+                color: #1f2937;
+                border: none;
+                font-family: "Segoe UI", "Ubuntu", "Helvetica Neue", sans-serif;
+                font-size: 12px;
+            }
+            QGroupBox {
+                background-color: #ffffff;
+                border: 1px solid #e5e7eb;
+                border-radius: 8px;
+                margin-top: 10px;
+                padding: 8px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 6px;
+                color: #111827;
+                font-weight: 600;
+            }
+            QHeaderView::section {
+                background-color: #f9fafb;
+                color: #374151;
+                padding: 6px;
+                border: 1px solid #e5e7eb;
+                font-weight: 600;
+            }
+            QTabWidget::pane {
+                border: 1px solid #e5e7eb;
+                border-radius: 8px;
+                background: #ffffff;
+            }
+            QTabBar::tab {
+                background: #eef2ff;
+                color: #374151;
+                border: 1px solid #e5e7eb;
+                border-bottom: none;
+                padding: 8px 12px;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                margin-right: 4px;
+            }
+            QTabBar::tab:selected {
+                background: #ffffff;
+                color: #111827;
+            }
+            QTreeWidget, QListWidget, QTreeView, QTableWidget {
+                background-color: #ffffff;
+                color: #111827;
+                border: 1px solid #e5e7eb;
+                border-radius: 8px;
+            }
+            QPushButton {
+                background-color: #2563eb;
+                color: #ffffff;
+                border: none;
+                padding: 6px 12px;
+                border-radius: 6px;
+            }
+            QPushButton:hover {
+                background-color: #1d4ed8;
+            }
+            QPushButton:pressed {
+                background-color: #1e40af;
+            }
+            QLineEdit, QTextEdit, QSpinBox, QComboBox {
+                background-color: #ffffff;
+                color: #111827;
+                border: 1px solid #e5e7eb;
+                border-radius: 6px;
+                padding: 4px 6px;
+            }
+            QCheckBox::indicator {
+                border: 1px solid #cbd5f5;
+                background-color: #ffffff;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #2563eb;
+            }
+            QSplitter::handle {
+                background: #e5e7eb;
+            }
+            QMenuBar {
+                background-color: #ffffff;
+                color: #111827;
+            }
+            QMenuBar::item:selected {
+                background: #e5e7eb;
+            }
+            QMenu {
+                background-color: #ffffff;
+                color: #111827;
+                border: 1px solid #e5e7eb;
+            }
+            QMenu::item:selected {
+                background-color: #e5e7eb;
+            }
+            QStatusBar {
+                background-color: #ffffff;
+                color: #374151;
+            }
+            QMessageBox, QDialog {
+                background-color: #ffffff;
+                color: #111827;
+            }
+        """)
 
     def setup_logging(self):
         """Настраивает перехват логов для отображения в GUI."""
-        self.log_signal.connect(self.log_text.append)
+        self.log_signal.connect(self._append_log_line)
         self.log_signal.connect(self.statusBar().showMessage)
         handler = QtLogHandler(self.log_signal)
         
         # Устанавливаем формат для логов в GUI
-        formatter = logging.Formatter('%(asctime)s - %(message)s')
+        formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
         handler.setFormatter(formatter)
         
         # Добавляем обработчик к корневому логгеру
@@ -294,6 +309,7 @@ class ServerGUI(QMainWindow):
             with open(APP_CONFIG['SETTINGS_FILE'], 'r', encoding='utf-8') as f:
                 settings = json.load(f)
             self.custom_commands = settings.get('custom_commands', self.get_default_custom_commands())
+            self.client_meta = settings.get('clients_meta', {})
             server_settings = settings.get('server_settings', {})
             self.grid_refresh_interval = server_settings.get('grid_refresh_interval', 10)
             self.quality_grid = server_settings.get('quality_grid', 30)
@@ -302,6 +318,7 @@ class ServerGUI(QMainWindow):
             self.theme = server_settings.get('theme', 'light')
         except (FileNotFoundError, json.JSONDecodeError):
             self.custom_commands = self.get_default_custom_commands()
+            self.client_meta = {}
             self.grid_refresh_interval = 10
             self.quality_grid = 30
             self.websocket_max_size_mb = 100
@@ -313,6 +330,7 @@ class ServerGUI(QMainWindow):
         """Сохранение всех настроек сервера в файл."""
         all_settings = {
             'custom_commands': self.custom_commands,
+            'clients_meta': self.client_meta,
             'server_settings': {
                 'grid_refresh_interval': self.grid_refresh_interval,
                 'quality_grid': self.quality_grid,
@@ -397,6 +415,36 @@ class ServerGUI(QMainWindow):
         view_switcher_layout.addStretch()
         clients_group_layout.addLayout(view_switcher_layout)
 
+        # --- Панель действий ---
+        actions_layout = QHBoxLayout()
+        self.refresh_btn = QPushButton("Обновить")
+        self.refresh_btn.clicked.connect(self.refresh_client_data)
+        self.message_btn = QPushButton("Сообщение")
+        self.message_btn.clicked.connect(self.send_message_to_clients)
+        self.reboot_btn = QPushButton("Перезагрузить")
+        self.reboot_btn.clicked.connect(self.reboot_client)
+        self.shutdown_btn = QPushButton("Выключить")
+        self.shutdown_btn.clicked.connect(self.shutdown_client)
+        self.update_btn = QPushButton("Обновить клиент")
+        self.update_btn.clicked.connect(self.update_selected_clients)
+        self.disconnect_btn = QPushButton("Отключить")
+        self.disconnect_btn.clicked.connect(self.disconnect_client)
+
+        actions_layout.addWidget(self.refresh_btn)
+        actions_layout.addWidget(self.message_btn)
+        actions_layout.addWidget(self.reboot_btn)
+        actions_layout.addWidget(self.shutdown_btn)
+        actions_layout.addWidget(self.update_btn)
+        actions_layout.addWidget(self.disconnect_btn)
+        actions_layout.addStretch()
+
+        actions_layout.addWidget(QLabel("Поиск:"))
+        self.client_filter_input = QLineEdit()
+        self.client_filter_input.setPlaceholderText("IP, hostname, теги...")
+        self.client_filter_input.textChanged.connect(self.filter_clients)
+        actions_layout.addWidget(self.client_filter_input)
+        clients_group_layout.addLayout(actions_layout)
+
         # --- Стек для видов ---
         self.view_stack = QStackedWidget()
 
@@ -432,14 +480,56 @@ class ServerGUI(QMainWindow):
         # 2. Вкладка лога
         self.log_view_tab = QWidget()
         log_layout = QVBoxLayout(self.log_view_tab)
+        log_filter_layout = QHBoxLayout()
+        log_filter_layout.addWidget(QLabel("Фильтр:"))
+        self.log_filter_input = QLineEdit()
+        self.log_filter_input.setPlaceholderText("Поиск по логу...")
+        self.log_filter_input.textChanged.connect(self.apply_log_filter)
+        log_filter_layout.addWidget(self.log_filter_input)
+        self.log_info_cb = QCheckBox("INFO")
+        self.log_warn_cb = QCheckBox("WARNING")
+        self.log_error_cb = QCheckBox("ERROR")
+        self.log_info_cb.setChecked(True)
+        self.log_warn_cb.setChecked(True)
+        self.log_error_cb.setChecked(True)
+        self.log_info_cb.stateChanged.connect(self.apply_log_filter)
+        self.log_warn_cb.stateChanged.connect(self.apply_log_filter)
+        self.log_error_cb.stateChanged.connect(self.apply_log_filter)
+        log_filter_layout.addWidget(self.log_info_cb)
+        log_filter_layout.addWidget(self.log_warn_cb)
+        log_filter_layout.addWidget(self.log_error_cb)
+        log_filter_layout.addStretch()
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         log_layout.addWidget(QLabel("Системный лог:"))
+        log_layout.addLayout(log_filter_layout)
         log_layout.addWidget(self.log_text)
+
+        # 3. Вкладка задач
+        self.tasks_tab = QWidget()
+        tasks_layout = QVBoxLayout(self.tasks_tab)
+        tasks_form = QHBoxLayout()
+        tasks_form.addWidget(QLabel("Команда:"))
+        self.task_command_input = QLineEdit()
+        tasks_form.addWidget(self.task_command_input)
+        tasks_form.addWidget(QLabel("Через (сек):"))
+        self.task_delay_input = QLineEdit("60")
+        self.task_delay_input.setFixedWidth(80)
+        tasks_form.addWidget(self.task_delay_input)
+        self.task_add_btn = QPushButton("Запланировать")
+        self.task_add_btn.clicked.connect(self.add_scheduled_task)
+        tasks_form.addWidget(self.task_add_btn)
+        tasks_form.addStretch()
+
+        self.tasks_list = QListWidget()
+        tasks_layout.addLayout(tasks_form)
+        tasks_layout.addWidget(QLabel("Очередь задач:"))
+        tasks_layout.addWidget(self.tasks_list)
         
         # Добавляем вкладки
         self.tabs.addTab(self.clients_list_tab, "Клиенты")
         self.tabs.addTab(self.log_view_tab, "Системный лог")
+        self.tabs.addTab(self.tasks_tab, "Задачи")
         
         main_layout.addWidget(self.tabs)
         
@@ -449,6 +539,11 @@ class ServerGUI(QMainWindow):
         # Таймер для обновления скриншотов в сетке
         self.grid_refresh_timer = QTimer(self)
         self.grid_refresh_timer.timeout.connect(self.request_grid_screenshots)
+
+        # Таймер проверки задач
+        self.tasks_timer = QTimer(self)
+        self.tasks_timer.timeout.connect(self.process_scheduled_tasks)
+        self.tasks_timer.start(1000)
 
     def _set_app_icon(self):
         """
@@ -590,10 +685,10 @@ class ServerGUI(QMainWindow):
                 open_tab_action.setEnabled(False)
             menu.addSeparator()
 
-        refresh_action = menu.addAction("🔄 Обновить данные")
+        refresh_action = menu.addAction("Обновить данные")
         refresh_action.triggered.connect(self.refresh_client_data)
         
-        send_message_action = menu.addAction("💬 Отправить сообщение")
+        send_message_action = menu.addAction("Отправить сообщение")
         send_message_action.triggered.connect(self.send_message_to_clients)
 
         update_action = menu.addAction("⬆️ Обновить клиент")
@@ -605,7 +700,7 @@ class ServerGUI(QMainWindow):
         
         menu.addSeparator()
 
-        reboot_action = menu.addAction("🔄 Перезагрузить")
+        reboot_action = menu.addAction("Перезагрузить")
         reboot_action.triggered.connect(self.reboot_client)
 
         shutdown_action = menu.addAction("Выключить")
@@ -639,7 +734,7 @@ class ServerGUI(QMainWindow):
         connection_data = json.loads(connection_data_json)
         client_id = connection_data['client_id']
         client_info = connection_data.get('client_info', {})
-        ip_address = client_id.split(':')[0]
+        ip_address = connection_data.get('client_ip') or client_id.split(':')[0]
         hostname = client_info.get('hostname', 'N/A')
 
         # --- Проверка на дубликат по hostname ---
@@ -661,10 +756,12 @@ class ServerGUI(QMainWindow):
 
         # --- Поиск существующей записи для переподключившегося клиента ---
         old_client_id = None
+        if client_id in self.client_data:
+            old_client_id = client_id
         # Ищем по hostname, он более уникален чем IP в DHCP сетях.
         # Новая сессия всегда приоритетнее, поэтому ищем любого клиента с таким hostname,
         # даже если он еще числится подключенным (старая сессия могла "зависнуть").
-        if hostname:
+        if not old_client_id and hostname:
             for cid, cdata in self.client_data.items():
                 if cdata.get('hostname') == hostname:
                     old_client_id = cid
@@ -688,6 +785,9 @@ class ServerGUI(QMainWindow):
             
             self.client_data[client_id] = { 'status': 'Connected', 'ip': ip_address, 'settings': old_settings }
             self.client_data[client_id].update(client_info)
+            if old_client_id in self.client_meta and old_client_id != client_id:
+                self.client_meta[client_id] = self.client_meta.pop(old_client_id)
+            self.client_data[client_id]['tags'] = self.client_meta.get(client_id, {}).get('tags', [])
 
             # 2. Обновляем ссылку на элемент дерева
             item = self.tree_items.pop(old_client_id)
@@ -705,6 +805,7 @@ class ServerGUI(QMainWindow):
             logging.info(f"Новое подключение: {client_id} ({hostname})")
             self.client_data[client_id] = { 'status': 'Connected', 'ip': ip_address, 'settings': {} }
             self.client_data[client_id].update(client_info)
+            self.client_data[client_id]['tags'] = self.client_meta.get(client_id, {}).get('tags', [])
             # Создаем для него элементы в GUI
             self._create_gui_items_for_client(client_id)
 
@@ -718,7 +819,7 @@ class ServerGUI(QMainWindow):
         
     def handle_connection_lost(self, client_id):
         hostname = self.client_data.get(client_id, {}).get('hostname', client_id)
-        logging.warning(f"🔌 Отключение: {client_id} ({hostname})")
+        logging.warning(f"[Отключение] {client_id} ({hostname})")
         if client_id in self.client_data:
             self.client_data[client_id]['status'] = 'Disconnected'
             self.update_tree_item(client_id)
@@ -743,6 +844,7 @@ class ServerGUI(QMainWindow):
         
         # Обновляем данные клиента и главный список
         self.client_data[client_id].update(data)
+        self._update_history(client_id, data)
         self.update_tree_item(client_id)
         
         # Делегирование обработки конкретным методам через диспетчер
@@ -989,7 +1091,7 @@ class ServerGUI(QMainWindow):
                 'progress_timer': timer,
                 'finished': False, # Флаг для предотвращения двойной обработки
             }
-            self._log_client_action(client_id, f"📥 Началось скачивание файла '{filename}' ({filesize / 1024 / 1024:.2f} MB).", "")
+            self._log_client_action(client_id, f"[Загрузка] Началось скачивание файла '{filename}' ({filesize / 1024 / 1024:.2f} MB).", "")
         except Exception as e:
             self._log_client_action(client_id, f"❌ Ошибка начала скачивания: {e}", f"Ошибка начала скачивания от {client_id}: {e}")
             if 'progress_dialog' in locals():
@@ -1066,7 +1168,7 @@ class ServerGUI(QMainWindow):
         try:
             if os.path.exists(file_path):
                 os.remove(file_path)
-                self._log_client_action(client_id_for_log, f"🗑️ Частично переданный файл '{os.path.basename(file_path)}' удален.", "")
+                self._log_client_action(client_id_for_log, f"[Очистка] Частично переданный файл '{os.path.basename(file_path)}' удален.", "")
         except OSError as e:
             logging.error(f"Не удалось удалить частичный файл {file_path}: {e}")
 
@@ -1114,6 +1216,12 @@ class ServerGUI(QMainWindow):
 
         data = self.client_data[client_id]
         hostname = data.get('hostname', 'N/A')
+        tags = data.get('tags', [])
+        info_text = data.get('settings', {}).get('info_text', '')
+        note_text = info_text
+        if tags:
+            tag_str = ", ".join(tags)
+            note_text = f"{info_text} | Теги: {tag_str}" if info_text else f"Теги: {tag_str}"
         cpu = round(data.get('cpu_percent', 0))
         mem = round(data.get('memory_percent', 0))
         status = data.get('status', 'Unknown')
@@ -1121,7 +1229,7 @@ class ServerGUI(QMainWindow):
         # --- Обновляем элемент дерева ---
         tree_item.setText(0, data.get('ip', 'N/A'))
         tree_item.setText(1, hostname)
-        tree_item.setText(2, data.get('settings',{}).get('info_text',''))
+        tree_item.setText(2, note_text)
         tree_item.setText(3, data.get('version', 'N/A'))
         tree_item.setText(4, f"{cpu}%")
         tree_item.setText(5, f"{mem}%")
@@ -1145,7 +1253,12 @@ class ServerGUI(QMainWindow):
             grid_item.setFlags(grid_item.flags() | Qt.ItemIsEnabled)
             tree_item.setFlags(tree_item.flags() | Qt.ItemIsEnabled)
             # Обновляем текст в сетке
-            grid_item.setText(f"{hostname} {data.get('settings',{}).get('info_text','')}\nCPU: {cpu}% | RAM: {mem}%")
+            grid_info = f"{hostname}"
+            if info_text:
+                grid_info += f" {info_text}"
+            if tags:
+                grid_info += f"\nТеги: {', '.join(tags)}"
+            grid_item.setText(f"{grid_info}\nCPU: {cpu}% | RAM: {mem}%")
             # Если иконки нет (например, после переподключения), ставим заглушку, чтобы зарезервировать место
             if grid_item.icon().isNull():
                 grid_item.setIcon(self.placeholder_icon)
@@ -1184,6 +1297,126 @@ class ServerGUI(QMainWindow):
     def update_clients_count(self):
         count = len([cid for cid, data in self.client_data.items() if data.get('status') == 'Connected'])
         self.clients_count_label.setText(f"Клиентов: {count}")
+
+    def filter_clients(self):
+        query = (self.client_filter_input.text() or "").strip().lower()
+        for i in range(self.clients_tree.topLevelItemCount()):
+            item = self.clients_tree.topLevelItem(i)
+            client_id = getattr(item, "client_id", "")
+            tags = self.client_data.get(client_id, {}).get("tags", [])
+            haystack = " ".join([
+                item.text(0),
+                item.text(1),
+                item.text(2),
+                item.text(3),
+                " ".join(tags) if tags else ""
+            ]).lower()
+            item.setHidden(bool(query) and query not in haystack)
+
+        for i in range(self.clients_grid.count()):
+            item = self.clients_grid.item(i)
+            client_id = item.data(Qt.UserRole)
+            tags = self.client_data.get(client_id, {}).get("tags", [])
+            haystack = " ".join([item.text(), " ".join(tags) if tags else ""]).lower()
+            item.setHidden(bool(query) and query not in haystack)
+
+    def _append_log_line(self, line):
+        self._log_lines.append(line)
+        if self._log_filter_active():
+            if self._log_line_matches(line):
+                self.log_text.append(line)
+            return
+        self.log_text.append(line)
+
+    def _log_filter_active(self):
+        if (self.log_filter_input.text() or "").strip():
+            return True
+        return not (self.log_info_cb.isChecked() and self.log_warn_cb.isChecked() and self.log_error_cb.isChecked())
+
+    def _log_line_matches(self, line):
+        text = (self.log_filter_input.text() or "").strip().lower()
+        if text and text not in line.lower():
+            return False
+        level_ok = False
+        if "[INFO]" in line and self.log_info_cb.isChecked():
+            level_ok = True
+        if "[WARNING]" in line and self.log_warn_cb.isChecked():
+            level_ok = True
+        if "[ERROR]" in line and self.log_error_cb.isChecked():
+            level_ok = True
+        return level_ok
+
+    def apply_log_filter(self):
+        self.log_text.clear()
+        for line in self._log_lines:
+            if self._log_line_matches(line):
+                self.log_text.append(line)
+
+    def _update_history(self, client_id, data):
+        history = self.metrics_history[client_id]
+        cpu = data.get("cpu_percent")
+        mem = data.get("memory_percent")
+        disk = data.get("disk_percent")
+        if isinstance(cpu, (int, float)):
+            history["cpu"].append(float(cpu))
+        if isinstance(mem, (int, float)):
+            history["mem"].append(float(mem))
+        if isinstance(disk, (int, float)):
+            history["disk"].append(float(disk))
+        self.client_data[client_id]["history"] = history
+        if client_id in self.client_tabs:
+            self.client_tabs[client_id].update_history(history)
+
+    def add_scheduled_task(self):
+        command = self.task_command_input.text().strip()
+        if not command:
+            QMessageBox.warning(self, "Предупреждение", "Введите команду для выполнения.")
+            return
+
+        selected_ids = self.get_selected_client_ids()
+        if not selected_ids:
+            QMessageBox.warning(self, "Предупреждение", "Выберите одного или нескольких клиентов.")
+            return
+
+        try:
+            delay = int(self.task_delay_input.text().strip())
+        except ValueError:
+            QMessageBox.warning(self, "Предупреждение", "Задержка должна быть числом (сек).")
+            return
+
+        delay = max(1, delay)
+        run_at = time.time() + delay
+        task = {
+            "run_at": run_at,
+            "command": command,
+            "clients": list(selected_ids),
+        }
+        item_text = f"{command} -> {len(selected_ids)} клиент(ов) через {delay} сек"
+        item = QListWidgetItem(item_text)
+        self.tasks_list.addItem(item)
+        task["item"] = item
+        self.scheduled_tasks.append(task)
+        self.task_command_input.clear()
+
+    def process_scheduled_tasks(self):
+        if not self.scheduled_tasks:
+            return
+        now = time.time()
+        remaining = []
+        for task in self.scheduled_tasks:
+            if now < task["run_at"]:
+                remaining.append(task)
+                continue
+            for client_id in task["clients"]:
+                asyncio.run_coroutine_threadsafe(
+                    self.ws_server.send_command(client_id, f"execute:{task['command']}"),
+                    self.ws_server.loop
+                )
+            if task.get("item"):
+                row = self.tasks_list.row(task["item"])
+                if row != -1:
+                    self.tasks_list.takeItem(row)
+        self.scheduled_tasks = remaining
         
     def _log_client_action(self, client_id, message_for_client_log, message_for_system_log):
         """Логирует действие в лог клиента или в системный лог."""
@@ -1204,6 +1437,17 @@ class ServerGUI(QMainWindow):
             self.client_data[client_id]['settings'].update(new_settings)
             client_name = self.client_data[client_id].get('hostname', client_id)
             self._log_client_action(client_id, "Настройки клиента обновлены.", f"Настройки для клиента {client_name} обновлены в памяти сервера.")
+
+    def on_client_meta_changed(self, client_id, meta):
+        """Слот для сохранения метаданных клиента (теги и т.п.)."""
+        if client_id not in self.client_data:
+            return
+        tags = meta.get("tags", [])
+        self.client_data[client_id]["tags"] = tags
+        self.client_meta[client_id] = {"tags": tags}
+        self.save_settings()
+        self.update_tree_item(client_id)
+        self.filter_clients()
 
     def disconnect_client(self):
         selected_ids = self.get_selected_client_ids()
@@ -1244,7 +1488,7 @@ class ServerGUI(QMainWindow):
 
         if self.client_data[client_id].get('status') != 'Connected':
             logging.warning(f"Попытка открыть вкладку для отключенного клиента: {client_id}")
-            QMessageBox.warning(self, "Ошибка", "Клиент не подключен. 🔌")
+            QMessageBox.warning(self, "Ошибка", "Клиент не подключен.")
             return
             
         if client_id in self.client_tabs:
@@ -1266,6 +1510,10 @@ class ServerGUI(QMainWindow):
                               main_window=self)
         tab.custom_commands_updated.connect(self.on_custom_commands_updated)
         tab.settings_changed.connect(lambda settings, cid=client_id: self.on_client_settings_changed(cid, settings))
+        tab.meta_changed.connect(lambda meta, cid=client_id: self.on_client_meta_changed(cid, meta))
+        history = self.client_data[client_id].get("history")
+        if history:
+            tab.update_history(history)
         
         tab_index = self.tabs.addTab(tab, f"{client_name}")
         self.tabs.setCurrentIndex(tab_index)
@@ -1279,7 +1527,7 @@ class ServerGUI(QMainWindow):
                 self.tabs.setCurrentIndex(i)
                 return
         # Вставляем на первую позицию
-        index = self.tabs.insertTab(0, self.clients_list_tab, "🖥️ Клиенты")
+        index = self.tabs.insertTab(0, self.clients_list_tab, "Клиенты")
         self.tabs.setCurrentIndex(index)
 
     def show_log_tab(self):
@@ -1298,7 +1546,7 @@ class ServerGUI(QMainWindow):
                 break
         
         insert_pos = client_tab_index + 1 if client_tab_index != -1 else 0
-        index = self.tabs.insertTab(insert_pos, self.log_view_tab, "📜 Системный лог")
+        index = self.tabs.insertTab(insert_pos, self.log_view_tab, "Системный лог")
         self.tabs.setCurrentIndex(index)
 
     def close_tab(self, index):
@@ -1337,7 +1585,7 @@ class ServerGUI(QMainWindow):
             QMessageBox.warning(self, "Предупреждение", "Пожалуйста, выберите одного или нескольких клиентов.")
             return
 
-        message, ok = QInputDialog.getMultiLineText(self, "💬 Отправить сообщение", "Введите сообщение для выбранных клиентов:")
+        message, ok = QInputDialog.getMultiLineText(self, "Отправить сообщение", "Введите сообщение для выбранных клиентов:")
         if not (ok and message.strip()): return
 
         for client_id in selected_ids:
@@ -1356,15 +1604,8 @@ class ServerGUI(QMainWindow):
             QMessageBox.warning(self, "Предупреждение", "Пожалуйста, выберите одного или нескольких клиентов для обновления.")
             return
 
-        # Определяем ОС первого клиента (мы уже знаем, что они все одинаковые)
-        first_client_os = self.client_data.get(selected_ids[0], {}).get('os_type', 'Linux')
-
-        if first_client_os == 'Windows':
-            title = "⬆️ Выберите .exe файл для обновления"
-            file_filter = "Executable Files (*.exe)"
-        else: # Linux
-            title = "⬆️ Выберите .deb пакет для обновления"
-            file_filter = "DEB Packages (*.deb)"
+        title = "⬆️ Выберите .deb пакет для обновления"
+        file_filter = "DEB Packages (*.deb)"
 
         package_path, _ = QFileDialog.getOpenFileName(self, title, "", file_filter)
         if not package_path: return
@@ -1395,14 +1636,16 @@ class ServerGUI(QMainWindow):
             await self.ws_server.send_command(client_id, f"upload_file_start:{remote_path}:{file_size}")
 
             CHUNK_SIZE = self.websocket_chunk_size_mb * 1024 * 1024
+            hasher = hashlib.sha256()
             with open(deb_path, 'rb') as f:
                 while chunk := f.read(CHUNK_SIZE):
+                    hasher.update(chunk)
                     chunk_b64 = base64.b64encode(chunk).decode('ascii')
                     await self.ws_server.send_command(client_id, f"upload_file_chunk:{chunk_b64}")
             
-            await self.ws_server.send_command(client_id, "upload_file_end")
+            await self.ws_server.send_command(client_id, f"upload_file_end:{hasher.hexdigest()}")
             self._log_client_action(client_id, f"✅ Пакет '{filename}' успешно загружен в {remote_path}.", "")
-            self._log_client_action(client_id, "🚀 Запуск установки пакета... Клиент будет перезапущен.", "")
+            self._log_client_action(client_id, "Запуск установки пакета. Клиент будет перезапущен.", "")
             await self.ws_server.send_command(client_id, f"install_package:{remote_path}")
         except Exception as e:
             self._log_client_action(client_id, f"❌ Ошибка в процессе обновления: {e}", "")

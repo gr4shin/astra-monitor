@@ -7,8 +7,8 @@ import asyncio
 import logging
 
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
-                             QListWidget, QMessageBox, QFileDialog, QInputDialog, QLineEdit,
-                             QListWidgetItem, QProgressDialog, QMenu)
+                             QTreeWidget, QTreeWidgetItem, QMessageBox, QFileDialog, QInputDialog, QLineEdit,
+                             QProgressDialog, QMenu)
 from PyQt5.QtCore import Qt, pyqtSignal
 
 class FileManagerWidget(QWidget):
@@ -21,6 +21,8 @@ class FileManagerWidget(QWidget):
         self.ws_server = ws_server
         self.client_id = client_id
         self.current_path = "/"
+        self.back_stack = []
+        self.forward_stack = []
         self.log_callback = log_callback or (lambda msg: print(msg))
         self.main_window = main_window # Store main window reference
         self.upload_task = None
@@ -31,26 +33,43 @@ class FileManagerWidget(QWidget):
         
         # Путь и кнопки навигации
         path_layout = QHBoxLayout()
-        self.path_label = QLabel("Путь: /")
-        self.up_button = QPushButton("⬆️ Наверх")
-        self.up_button.clicked.connect(self.go_up)
-        self.refresh_button = QPushButton("🔄 Обновить")
-        self.refresh_button.clicked.connect(self.refresh_files)
-        self.home_button = QPushButton("🏠 Домой")
+        self.back_button = QPushButton("Назад")
+        self.back_button.clicked.connect(self.go_back)
+        self.forward_button = QPushButton("Вперед")
+        self.forward_button.clicked.connect(self.go_forward)
+        self.home_button = QPushButton("Домой")
         self.home_button.clicked.connect(self.go_home)
-        
-        path_layout.addWidget(self.path_label)
+        self.up_button = QPushButton("Вверх")
+        self.up_button.clicked.connect(self.go_up)
+        self.refresh_button = QPushButton("Обновить")
+        self.refresh_button.clicked.connect(self.refresh_files)
+        self.path_input = QLineEdit(self.current_path)
+        self.path_input.returnPressed.connect(self.navigate_to_path)
+
+        path_layout.addWidget(self.back_button)
+        path_layout.addWidget(self.forward_button)
         path_layout.addWidget(self.home_button)
         path_layout.addWidget(self.up_button)
         path_layout.addWidget(self.refresh_button)
-        path_layout.addStretch()
+        path_layout.addWidget(QLabel("Путь:"))
+        path_layout.addWidget(self.path_input, 1)
         
         # Список файлов
         files_frame = QFrame()
         files_layout = QVBoxLayout(files_frame)
-        files_layout.addWidget(QLabel("🗂️ Файлы и папки:"))
-        
-        self.files_list = QListWidget()
+        search_layout = QHBoxLayout()
+        search_layout.addWidget(QLabel("Поиск:"))
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Имя файла или папки...")
+        self.search_input.textChanged.connect(self.filter_files)
+        search_layout.addWidget(self.search_input, 1)
+        files_layout.addLayout(search_layout)
+
+        self.files_list = QTreeWidget()
+        self.files_list.setHeaderLabels(["Имя", "Тип", "Размер"])
+        self.files_list.setColumnWidth(0, 360)
+        self.files_list.setSortingEnabled(True)
+        self.files_list.setSelectionMode(self.files_list.ExtendedSelection)
         self.files_list.itemDoubleClicked.connect(self.on_item_double_clicked)
         self.files_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.files_list.customContextMenuRequested.connect(self.show_file_context_menu)
@@ -81,23 +100,24 @@ class FileManagerWidget(QWidget):
             for file_info in files_data['files']:
                 if file_info['type'] == 'directory':
                     name = file_info['name']
-                    item = QListWidgetItem(f"📁 {name}")
+                    item = QTreeWidgetItem([name, "Папка", ""])
                     path = posixpath.join(self.current_path, name)
-                    item.setData(Qt.UserRole, {"type": "directory", "path": path})
-                    self.files_list.addItem(item)
+                    item.setData(0, Qt.UserRole, {"type": "directory", "path": path})
+                    self.files_list.addTopLevelItem(item)
             
             # Добавляем файлы
             for file_info in files_data['files']:
                 if file_info['type'] == 'file':
                     name, size = file_info['name'], self.format_size(file_info['size'])
-                    item = QListWidgetItem(f"📄 {name} ({size})")
+                    item = QTreeWidgetItem([name, "Файл", size])
                     path = posixpath.join(self.current_path, name)
-                    item.setData(Qt.UserRole, {
+                    item.setData(0, Qt.UserRole, {
                         "type": "file", 
                         "path": path, 
                         "size": file_info['size']
                     })
-                    self.files_list.addItem(item)
+                    self.files_list.addTopLevelItem(item)
+        self.filter_files()
 
     def format_size(self, size_bytes):
         """Форматирование размера файла"""
@@ -112,42 +132,74 @@ class FileManagerWidget(QWidget):
     
     def on_item_double_clicked(self, item):
         """Обработка двойного клика по файлу/папке"""
-        file_info = item.data(Qt.UserRole)
+        file_info = item.data(0, Qt.UserRole)
         if file_info['type'] == 'directory':
-            self.current_path = file_info['path']
-            self.path_label.setText(f"Путь: {self.current_path}")
-            self.load_files()
+            self._set_path(file_info['path'])
     
     def go_up(self):
         """Переход на уровень выше"""
         if self.current_path != "/":
-            self.current_path = posixpath.dirname(self.current_path)
-            self.path_label.setText(f"Путь: {self.current_path}")
-            self.load_files()
+            self._set_path(posixpath.dirname(self.current_path))
     
     def go_home(self):
         """Переход в домашнюю директорию"""
-        self.current_path = "/"
-        self.path_label.setText("Путь: /")
-        self.load_files()
+        self._set_path("/")
+
+    def go_back(self):
+        if not self.back_stack:
+            return
+        self.forward_stack.append(self.current_path)
+        path = self.back_stack.pop()
+        self._set_path(path, push_history=False)
+
+    def go_forward(self):
+        if not self.forward_stack:
+            return
+        self.back_stack.append(self.current_path)
+        path = self.forward_stack.pop()
+        self._set_path(path, push_history=False)
     
     def refresh_files(self):
         """Обновление списка файлов"""
         self.load_files()
+
+    def navigate_to_path(self):
+        path = self.path_input.text().strip()
+        if not path:
+            return
+        self._set_path(path)
+
+    def _set_path(self, path, push_history=True):
+        if not path.startswith("/"):
+            path = posixpath.join(self.current_path, path)
+        path = posixpath.normpath(path)
+        if push_history and path != self.current_path:
+            self.back_stack.append(self.current_path)
+            self.forward_stack.clear()
+        self.current_path = path
+        self.path_input.setText(self.current_path)
+        self.load_files()
+
+    def filter_files(self):
+        query = (self.search_input.text() or "").lower().strip()
+        for i in range(self.files_list.topLevelItemCount()):
+            item = self.files_list.topLevelItem(i)
+            name = (item.text(0) or "").lower()
+            item.setHidden(bool(query) and query not in name)
     
     def download_file(self, item=None):
         """Скачивание выбранного файла"""
         current_item = item or self.files_list.currentItem()
         if not current_item:
-            QMessageBox.warning(self, "⚠️ Ошибка", "Выберите файл для скачивания")
+            QMessageBox.warning(self, "Ошибка", "Выберите файл для скачивания")
             return
             
-        file_info = current_item.data(Qt.UserRole)
+        file_info = current_item.data(0, Qt.UserRole)
         if not file_info:
-            QMessageBox.warning(self, "⚠️ Ошибка", "Не удалось получить информацию о файле.")
+            QMessageBox.warning(self, "Ошибка", "Не удалось получить информацию о файле.")
             return
         if file_info['type'] != 'file':
-            QMessageBox.warning(self, "⚠️ Ошибка", "Можно скачивать только файлы")
+            QMessageBox.warning(self, "Ошибка", "Можно скачивать только файлы")
             return
 
         remote_path = file_info['path']
@@ -176,11 +228,11 @@ class FileManagerWidget(QWidget):
             self.ws_server.send_command(self.client_id, command), 
             self.ws_server.loop
         )
-        self.log_callback(f"📥 Запрос на скачивание файла '{filename}' отправлен.")
+        self.log_callback(f"[Скачивание] Запрос на скачивание файла '{filename}' отправлен.")
 
     def upload_file(self):
         """Загрузка файла на клиента (с поддержкой чанков)"""
-        file_path, _ = QFileDialog.getOpenFileName(self, "📤 Выберите файл для загрузки")
+        file_path, _ = QFileDialog.getOpenFileName(self, "Выберите файл для загрузки")
         if not file_path:
             return
 
@@ -219,13 +271,13 @@ class FileManagerWidget(QWidget):
         if self.upload_task and not self.upload_task.done():
             # Потокобезопасно отменяем задачу в цикле asyncio
             self.ws_server.loop.call_soon_threadsafe(self.upload_task.cancel)
-        self.log_callback("📤 Отмена загрузки файла...")
+        self.log_callback("[Загрузка] Отмена загрузки файла...")
 
     async def _send_file_in_chunks_async(self, file_path, filename, file_size):
         """Асинхронная корутина для отправки файла по частям."""
         remote_path = posixpath.join(self.current_path, filename)
         try:
-            self.log_callback(f"📤 Начало загрузки файла '{filename}' ({file_size / 1024 / 1024:.2f} MB).")
+            self.log_callback(f"[Загрузка] Начало загрузки файла '{filename}' ({file_size / 1024 / 1024:.2f} MB).")
 
             # 1. Отправляем команду начала
             start_cmd = f"upload_file_start:{remote_path}:{file_size}"
@@ -255,31 +307,31 @@ class FileManagerWidget(QWidget):
 
             # 3. Отправляем команду завершения
             await self.ws_server.send_command(self.client_id, "upload_file_end")
-            self.upload_finished.emit(True, f"✅ Загрузка файла '{filename}' завершена.")
+            self.upload_finished.emit(True, f"Загрузка файла '{filename}' завершена.")
 
         except asyncio.CancelledError:
             await self.ws_server.send_command(self.client_id, f"cancel_upload:{remote_path}")
             self.upload_finished.emit(False, "Загрузка отменена пользователем.")
             raise # Важно для корректной отмены задачи
         except Exception as e:
-            error_message = f"❌ Ошибка при загрузке файла: {e}"
+            error_message = f"Ошибка при загрузке файла: {e}"
             self.upload_finished.emit(False, error_message)
 
     def rename_file(self, item=None):
         """Переименование файла или папки"""
         current_item = item or self.files_list.currentItem()
         if not current_item:
-            QMessageBox.warning(self, "⚠️ Ошибка", "Выберите файл или папку для переименования")
+            QMessageBox.warning(self, "Ошибка", "Выберите файл или папку для переименования")
             return
 
-        file_info = current_item.data(Qt.UserRole)
+        file_info = current_item.data(0, Qt.UserRole)
         if not file_info:
-            QMessageBox.warning(self, "⚠️ Ошибка", "Не удалось получить информацию о файле.")
+            QMessageBox.warning(self, "Ошибка", "Не удалось получить информацию о файле.")
             return
         old_name = os.path.basename(file_info['path'])
 
         new_name, ok = QInputDialog.getText(
-            self, "✏️ Переименовать", "Введите новое имя:",
+            self, "Переименовать", "Введите новое имя:",
             QLineEdit.Normal, old_name
         )
 
@@ -292,23 +344,23 @@ class FileManagerWidget(QWidget):
                 self.ws_server.send_command(self.client_id, command),
                 self.ws_server.loop
             )
-            self.log_callback(f"✏️ Отправлен запрос на переименование '{old_name}' в '{new_name}'.")
+            self.log_callback(f"Отправлен запрос на переименование '{old_name}' в '{new_name}'.")
 
     def delete_file(self, item=None):
         """Удаление выбранного файла/папки"""
         current_item = item or self.files_list.currentItem()
         if not current_item:
-            QMessageBox.warning(self, "⚠️ Ошибка", "Выберите файл или папку для удаления")
+            QMessageBox.warning(self, "Ошибка", "Выберите файл или папку для удаления")
             return
             
-        file_info = current_item.data(Qt.UserRole)
+        file_info = current_item.data(0, Qt.UserRole)
         if not file_info:
-            QMessageBox.warning(self, "⚠️ Ошибка", "Не удалось получить информацию о файле.")
+            QMessageBox.warning(self, "Ошибка", "Не удалось получить информацию о файле.")
             return
         name = os.path.basename(file_info['path'])
         
         reply = QMessageBox.question(
-            self, "❓ Подтверждение", 
+            self, "Подтверждение", 
             f"Вы уверены, что хотите удалить {'папку' if file_info['type'] == 'directory' else 'файл'} '{name}'?",
             QMessageBox.Yes | QMessageBox.No
         )
@@ -323,7 +375,7 @@ class FileManagerWidget(QWidget):
     def create_folder(self):
         """Создание новой папки"""
         folder_name, ok = QInputDialog.getText(
-            self, "➕ Новая папка", "Введите название папки:"
+            self, "Новая папка", "Введите название папки:"
         )
         
         if ok and folder_name:
@@ -339,18 +391,18 @@ class FileManagerWidget(QWidget):
         selected_item = self.files_list.itemAt(position)
 
         # Actions that are always available
-        refresh_action = menu.addAction("🔄 Обновить")
-        upload_action = menu.addAction("📤 Загрузить")
-        new_folder_action = menu.addAction("➕ Новая папка")
+        refresh_action = menu.addAction("Обновить")
+        upload_action = menu.addAction("Загрузить")
+        new_folder_action = menu.addAction("Новая папка")
         menu.addSeparator()
 
         # Actions that depend on selection
-        download_action = menu.addAction("📥 Скачать")
-        rename_action = menu.addAction("✏️ Переименовать")
-        delete_action = menu.addAction("🗑️ Удалить")
+        download_action = menu.addAction("Скачать")
+        rename_action = menu.addAction("Переименовать")
+        delete_action = menu.addAction("Удалить")
 
         if selected_item:
-            file_info = selected_item.data(Qt.UserRole)
+            file_info = selected_item.data(0, Qt.UserRole)
             if file_info:
                 is_file = file_info.get('type') == 'file'
                 download_action.setEnabled(is_file)

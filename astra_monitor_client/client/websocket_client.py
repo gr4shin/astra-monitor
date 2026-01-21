@@ -7,6 +7,9 @@ import json
 import platform
 import os
 import logging
+from datetime import datetime
+import uuid
+import random
 
 from astra_monitor_client.utils.config import deobfuscate_config, OBFUSCATION_KEY
 from astra_monitor_client.utils.system_utils import SystemMonitor, get_local_ip
@@ -15,21 +18,22 @@ from astra_monitor_client.handlers.command_handler import CommandHandler
 class SystemMonitorClient:
     def __init__(self, version="0.0.0-dev"):
         self.CLIENT_VERSION = version
-        if platform.system() == "Windows":
-            self.CONFIG_DIR = os.path.join(os.getenv('APPDATA'), 'AstraMonitorClient')
-        else:
-            self.CONFIG_DIR = "/etc/astra-monitor-client"
+        self.PROTOCOL_VERSION = 1
+        self.CONFIG_DIR = "/etc/astra-monitor-client"
         self.CONFIG_FILE = os.path.join(self.CONFIG_DIR, "config.json")
         
         self.settings = {
             "monitoring_interval": 10,
             "reconnect_delay": 5,
+            "reconnect_max_delay": 60,
+            "reconnect_jitter": 0.2,
             "info_text": '',
             "screenshot": {
                 "quality": 85,
                 "refresh_delay": 5,
                 "enabled": False
-            }
+            },
+            "client_id": None
         }
 
         embedded_config = self._load_embedded_config()
@@ -64,9 +68,14 @@ class SystemMonitorClient:
                     else:
                         self.settings[key] = value
 
+        self.client_id = self._ensure_client_id()
+
         self.REFRESH_INTERVAL = self.settings.get("monitoring_interval", 10)
         self.screenshot_settings = self.settings.get("screenshot", {})
         self.info_text = self.settings.get("info_text", '')
+        self.reconnect_base_delay = self.settings.get("reconnect_delay", 5)
+        self.reconnect_max_delay = self.settings.get("reconnect_max_delay", 60)
+        self.reconnect_jitter = self.settings.get("reconnect_jitter", 0.2)
 
         self.hostname = platform.node()
         self.local_ip = get_local_ip()
@@ -117,6 +126,20 @@ class SystemMonitorClient:
             logging.error("❌ Не удалось сохранить конфигурацию: %s", e, exc_info=True)
         else:
             logging.info("✅ Конфигурация успешно сохранена в %s", self.CONFIG_FILE)
+
+    def _ensure_client_id(self) -> str:
+        """Гарантирует наличие стабильного client_id и сохраняет его в конфиг."""
+        client_id = self.settings.get("client_id")
+        if isinstance(client_id, str) and client_id.strip():
+            return client_id.strip()
+
+        client_id = uuid.uuid4().hex
+        self.settings["client_id"] = client_id
+        try:
+            self.save_config()
+        except Exception:
+            logging.warning("⚠️ Не удалось сохранить client_id в конфиг.", exc_info=True)
+        return client_id
     
     def get_system_info(self):
         """Сбор информации о системе без psutil"""
@@ -177,6 +200,7 @@ class SystemMonitorClient:
         logging.info("Запуск клиента: %s (%s)", self.hostname, self.local_ip)
         logging.info("Подключение к серверу: %s", server_uri)
 
+        reconnect_attempts = 0
         while self.is_running:
             last_screenshot_time = 0
             screenshot_task = None
@@ -190,17 +214,25 @@ class SystemMonitorClient:
                 ) as websocket:
                     auth_data = json.dumps({
                         "auth_token": self.AUTH_TOKEN,
+                        "client_id": self.client_id,
+                        "protocol_version": self.PROTOCOL_VERSION,
+                        "capabilities": [
+                            "command_ack",
+                            "file_chunked",
+                            "screenshots"
+                        ],
                         "client_info": {
                             "hostname": self.hostname,
                             "os_type": platform.system(),
                             "platform_full": platform.platform(),
-                            "settings": self.settings
+                            "settings": {k: v for k, v in self.settings.items() if k != "client_id"}
 
                         }
                     })
                     async with self.send_lock:
                         await websocket.send(auth_data)
                     logging.info("✅ Аутентификация успешна")
+                    reconnect_attempts = 0
                     
                     while self.is_running:
                         current_time = time.time()
@@ -222,8 +254,17 @@ class SystemMonitorClient:
                             command_data = json.loads(command)
                             
                             if "command" in command_data:
+                                command_id = command_data.get("command_id")
+                                if command_id:
+                                    async with self.send_lock:
+                                        await websocket.send(json.dumps({
+                                            "command_ack": command_id,
+                                            "timestamp": datetime.now().isoformat()
+                                        }))
                                 response = await self.command_handler.handle_command(websocket, command_data["command"])
                                 if response is not None:
+                                    if command_id:
+                                        response["command_id"] = command_id
                                     async with self.send_lock:
                                         await websocket.send(json.dumps(response))
                                     
@@ -233,20 +274,32 @@ class SystemMonitorClient:
                             break # Exit inner loop on connection close
                             
             except websockets.exceptions.ConnectionClosed:
-                logging.warning("🔌 Соединение разорвано, повторная попытка через %s секунд...", self.settings['reconnect_delay'])
+                reconnect_attempts += 1
+                delay = min(self.reconnect_max_delay, self.reconnect_base_delay * (2 ** (reconnect_attempts - 1)))
+                jitter = random.uniform(-self.reconnect_jitter, self.reconnect_jitter)
+                delay = max(1, delay * (1 + jitter))
+                logging.warning("🔌 Соединение разорвано, повторная попытка через %.1f секунд...", delay)
                 logging.info("-> 🧹 Соединение разорвано, запускается очистка интерактивной сессии...")
                 await self.command_handler.cleanup_interactive_session()
-                await asyncio.sleep(self.settings['reconnect_delay'])
+                await asyncio.sleep(delay)
             except ConnectionRefusedError:
-                logging.error("❌ Сервер недоступен, повторная попытка через %s секунд...", self.settings['reconnect_delay'])
+                reconnect_attempts += 1
+                delay = min(self.reconnect_max_delay, self.reconnect_base_delay * (2 ** (reconnect_attempts - 1)))
+                jitter = random.uniform(-self.reconnect_jitter, self.reconnect_jitter)
+                delay = max(1, delay * (1 + jitter))
+                logging.error("❌ Сервер недоступен, повторная попытка через %.1f секунд...", delay)
                 logging.info("-> 🧹 Соединение недоступно, запускается очистка интерактивной сессии...")
                 await self.command_handler.cleanup_interactive_session()
-                await asyncio.sleep(self.settings['reconnect_delay'])
+                await asyncio.sleep(delay)
             except Exception:
-                logging.exception("🔌 Непредвиденная ошибка подключения, повтор через %s секунд...", self.settings['reconnect_delay'])
+                reconnect_attempts += 1
+                delay = min(self.reconnect_max_delay, self.reconnect_base_delay * (2 ** (reconnect_attempts - 1)))
+                jitter = random.uniform(-self.reconnect_jitter, self.reconnect_jitter)
+                delay = max(1, delay * (1 + jitter))
+                logging.exception("🔌 Непредвиденная ошибка подключения, повтор через %.1f секунд...", delay)
                 logging.info("-> 🧹 Непредвиденная ошибка, запускается очистка интерактивной сессии...")
                 await self.command_handler.cleanup_interactive_session()
-                await asyncio.sleep(self.settings['reconnect_delay'])
+                await asyncio.sleep(delay)
     
     def run(self):
         """Запуск клиента"""

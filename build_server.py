@@ -3,6 +3,7 @@
 Сборка автономного исполняемого файла сервера без зависимостей
 """
 
+import argparse
 import subprocess
 import sys
 import os
@@ -76,7 +77,7 @@ def build_standalone(build_config=None):
             print("🗑️ Временная директория с конфигурацией удалена.")
 
     print("[OK] Сборка сервера завершена!")
-    executable_path = f"./dist/astra-monitor-server{'.exe' if sys.platform == 'win32' else ''}"
+    executable_path = "./dist/astra-monitor-server"
     if os.path.exists(executable_path):
         print(f"📁 Исполняемый файл: {executable_path}")
         print(f"📊 Размер файла: {os.path.getsize(executable_path) / 1024 / 1024:.1f} MB")
@@ -97,8 +98,14 @@ def install_dependencies():
             print(f"📦 Устанавливаем {dep}...")
             subprocess.check_call([sys.executable, "-m", "pip", "install", dep])
 
-def main():
+def main(argv=None):
     """Основная функция"""
+    parser = argparse.ArgumentParser(description="Astra Monitor Server Builder")
+    parser.add_argument("--server-host")
+    parser.add_argument("--server-port")
+    parser.add_argument("--auth-token")
+    args = parser.parse_args(argv)
+
     print("🚀 Сборка автономного сервера мониторинга")
     print("=" * 50)
     
@@ -114,14 +121,19 @@ def main():
         print("\n" + "-"*20)
         print("Внедрение конфигурации в сервер (обязательно)")
         
-        while not (server_ip := input("Введите IP-адрес для прослушивания (например, 0.0.0.0): ").strip()):
-            print("❌ IP-адрес не может быть пустым.")
-        
-        while not (server_port_str := input("Введите порт для прослушивания (например, 8765): ").strip()):
-            print("❌ Порт не может быть пустым.")
+        if args.server_host and args.server_port and args.auth_token:
+            server_ip = args.server_host
+            server_port_str = args.server_port
+            auth_token = args.auth_token
+        else:
+            while not (server_ip := input("Введите IP-адрес для прослушивания (например, 0.0.0.0): ").strip()):
+                print("❌ IP-адрес не может быть пустым.")
+            
+            while not (server_port_str := input("Введите порт для прослушивания (например, 8765): ").strip()):
+                print("❌ Порт не может быть пустым.")
 
-        while not (auth_token := input("Введите токен аутентификации: ").strip()):
-            print("❌ Токен аутентификации не может быть пустым.")
+            while not (auth_token := input("Введите токен аутентификации: ").strip()):
+                print("❌ Токен аутентификации не может быть пустым.")
 
         print("-" * 20 + "\n")
 

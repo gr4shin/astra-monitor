@@ -1,6 +1,4 @@
 websockets
 PyQt5
-psutil
-pyautogui
 pyinstaller
 pillow

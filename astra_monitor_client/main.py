@@ -5,7 +5,7 @@ import traceback
 import os 
 
 # --- Версия клиента ---
-CLIENT_VERSION = "26.01.20a"
+CLIENT_VERSION = "26.01.21a"
 # --------------------
 
 def setup_logging():
@@ -29,7 +29,7 @@ def setup_logging():
         file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
     except (IOError, PermissionError):
         # Если не получилось, пробуем в /tmp или %TEMP%
-        temp_dir = os.path.join(os.path.expanduser("~"), "AppData", "Local", "Temp") if platform.system() == "Windows" else "/tmp"
+        temp_dir = "/tmp"
         log_file = os.path.join(temp_dir, log_file)
         file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
         

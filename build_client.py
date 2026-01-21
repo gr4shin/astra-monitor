@@ -3,6 +3,7 @@
 Сборка автономного исполняемого файла и .deb пакета для клиента
 """
 
+import argparse
 import subprocess
 import sys
 import os
@@ -64,10 +65,7 @@ def build_standalone(build_config=None):
         "--noupx",  # Отключение UPX (часто вызывает проблемы)
     ]
 
-    if sys.platform == "win32":
-        options.append("--windowed")
-    else:
-        options.append("--console")
+    options.append("--console")
 
     # Явно исключаем системные библиотеки
     options.extend([
@@ -78,21 +76,13 @@ def build_standalone(build_config=None):
 
     options.extend([
         "--hidden-import=websockets",
-        "--hidden-import=pyautogui",
-        "--hidden-import=psutil",
         "--hidden-import=pkg_resources.py2_warn", # Для совместимости
     ])
 
     # ДОБАВЬТЕ ЭТОТ БЛОК ДЛЯ ПРЕДОТВРАЩЕНИЯ КОНФЛИКТОВ:
-    if sys.platform != "win32":
-        options.extend([
-            "--runtime-tmpdir=/var/tmp",  # Используем системную временную директорию
-        ])
-
-    if sys.platform == "win32":
-        options.extend([
-            "--hidden-import=WMI",
-        ])
+    options.extend([
+        "--runtime-tmpdir=/var/tmp",  # Используем системную временную директорию
+    ])
     
     options.extend([
         "--clean",
@@ -125,8 +115,6 @@ def build_standalone(build_config=None):
 
     print("[OK] Сборка исполняемого файла завершена!")
     executable_path = Path("./dist/astra-monitor-client")
-    if sys.platform == "win32":
-        executable_path = executable_path.with_suffix(".exe")
 
     if executable_path.exists():
         print(f"📁 Исполняемый файл: {executable_path}")
@@ -262,12 +250,8 @@ def install_dependencies():
     """Установка всех необходимых зависимостей"""
     print("📦 Установка зависимостей...")
     dependencies = [
-        "websockets", 
-        "pyautogui",
-        "psutil",
+        "websockets",
     ]
-    if sys.platform == "win32":
-        dependencies.append("WMI")
 
     for dep in dependencies:
         try:
@@ -278,8 +262,17 @@ def install_dependencies():
             print(f"📦 Устанавливаем {dep}...")
             subprocess.check_call([sys.executable, "-m", "pip", "install", dep])
 
-def main():
+def main(argv=None):
     """Основная функция"""
+    parser = argparse.ArgumentParser(description="Astra Monitor Client Builder")
+    parser.add_argument("--server-host")
+    parser.add_argument("--server-port")
+    parser.add_argument("--auth-token")
+    parser.add_argument("--deb", dest="deb", action="store_true")
+    parser.add_argument("--no-deb", dest="deb", action="store_false")
+    parser.set_defaults(deb=None)
+    args = parser.parse_args(argv)
+
     print("🚀 Сборка автономного клиента мониторинга")
     print("=" * 50)
     
@@ -295,14 +288,19 @@ def main():
         print("\n" + "-"*20)
         print("Внедрение конфигурации в клиент (обязательно)")
 
-        while not (server_ip := input("Введите IP-адрес сервера: ").strip()):
-            print("❌ IP-адрес сервера не может быть пустым.")
+        if args.server_host and args.server_port and args.auth_token:
+            server_ip = args.server_host
+            server_port_str = args.server_port
+            auth_token = args.auth_token
+        else:
+            while not (server_ip := input("Введите IP-адрес сервера: ").strip()):
+                print("❌ IP-адрес сервера не может быть пустым.")
 
-        while not (server_port_str := input("Введите порт сервера (например, 8765): ").strip()):
-            print("❌ Порт сервера не может быть пустым.")
+            while not (server_port_str := input("Введите порт сервера (например, 8765): ").strip()):
+                print("❌ Порт сервера не может быть пустым.")
 
-        while not (auth_token := input("Введите токен аутентификации: ").strip()):
-            print("❌ Токен аутентификации не может быть пустым.")
+            while not (auth_token := input("Введите токен аутентификации: ").strip()):
+                print("❌ Токен аутентификации не может быть пустым.")
 
         print("-" * 20 + "\n")
 
@@ -319,35 +317,31 @@ def main():
         executable_path = build_standalone(build_config)
 
         if executable_path:
-            if sys.platform != "win32":
+            if args.deb is None:
                 create_deb = input("\nСоздать .deb пакет? (y/n): ").strip().lower()
-                if create_deb == 'y':
-                    deb_path = create_deb_package(executable_path)
-                    if deb_path:
-                        print("\n" + "=" * 50)
-                        print("[SUCCESS] Сборка для Linux завершена успешно!")
-                        print(f"📁 Исполняемый файл: {executable_path}")
-                        print(f"📦 Пакет для установки: {deb_path}")
-                        print("\nДля установки пакета:")
-                        print(f"  sudo dpkg -i {deb_path}")
-                        print("  sudo apt-get install -f  # если нужны зависимости")
-                        print("\nДля удаления:")
-                        print("  sudo dpkg -r astra-monitor-client")
-                    else:
-                        print("\n[WARN] Сборка исполняемого файла завершена, но не удалось создать .deb пакет.")
-                else:
+                create_deb_flag = (create_deb == 'y')
+            else:
+                create_deb_flag = args.deb
+
+            if create_deb_flag:
+                deb_path = create_deb_package(executable_path)
+                if deb_path:
                     print("\n" + "=" * 50)
                     print("[SUCCESS] Сборка для Linux завершена успешно!")
                     print(f"📁 Исполняемый файл: {executable_path}")
-                    print("Создание .deb пакета пропущено.")
+                    print(f"📦 Пакет для установки: {deb_path}")
+                    print("\nДля установки пакета:")
+                    print(f"  sudo dpkg -i {deb_path}")
+                    print("  sudo apt-get install -f  # если нужны зависимости")
+                    print("\nДля удаления:")
+                    print("  sudo dpkg -r astra-monitor-client")
+                else:
+                    print("\n[WARN] Сборка исполняемого файла завершена, но не удалось создать .deb пакет.")
             else:
                 print("\n" + "=" * 50)
-                print("[SUCCESS] Сборка для Windows завершена успешно!")
+                print("[SUCCESS] Сборка для Linux завершена успешно!")
                 print(f"📁 Исполняемый файл: {executable_path}")
-                print("\nДля добавления в автозагрузку:")
-                print("1. Нажмите Win + R")
-                print("2. Введите shell:startup и нажмите Enter.")
-                print("3. Скопируйте или создайте ярлык для файла astra-monitor-client.exe в открывшуюся папку.")
+                print("Создание .deb пакета пропущено.")
 
         else:
              raise Exception("Не удалось создать исполняемый файл.")

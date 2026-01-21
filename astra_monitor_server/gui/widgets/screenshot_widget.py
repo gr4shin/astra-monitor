@@ -23,15 +23,15 @@ class ScreenshotWidget(QWidget):
         layout = QVBoxLayout(self)
         
         # Панель управления
-        control_group = QGroupBox("🖥️ Управление экраном")
+        control_group = QGroupBox("Управление экраном")
         control_layout = QHBoxLayout(control_group)
                 
         # Кнопки управления
-        self.take_btn = QPushButton("📸 Сделать снимок")
+        self.take_btn = QPushButton("Сделать снимок")
         self.take_btn.clicked.connect(self.take_screenshot)
         control_layout.addWidget(self.take_btn)
         
-        self.auto_refresh_btn = QPushButton("🔄 Автообновление")
+        self.auto_refresh_btn = QPushButton("Автообновление")
         self.auto_refresh_btn.setCheckable(True)
         self.auto_refresh_btn.clicked.connect(self.toggle_auto_refresh)
         control_layout.addWidget(self.auto_refresh_btn)
@@ -39,14 +39,14 @@ class ScreenshotWidget(QWidget):
         control_layout.addStretch()
         
         # Область отображения скриншота
-        image_group = QGroupBox("🖼️ Экран клиента")
+        image_group = QGroupBox("Экран клиента")
         image_layout = QVBoxLayout(image_group)
         
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignCenter)
         self.image_label.setMinimumSize(400, 300)
         self.image_label.setStyleSheet("background-color: #2b2b2b; border: 1px solid #555;")
-        self.image_label.setText("Нажмите '📸 Сделать снимок' для получения изображения")
+        self.image_label.setText("Нажмите 'Сделать снимок' для получения изображения")
         
         # Scroll area для больших экранов
         scroll_area = QScrollArea()
@@ -58,7 +58,7 @@ class ScreenshotWidget(QWidget):
         # Информация о снимке
         info_layout = QHBoxLayout()
         self.info_label = QLabel("Размер: - | Время: -")
-        self.save_btn = QPushButton("💾 Сохранить")
+        self.save_btn = QPushButton("Сохранить")
         self.save_btn.clicked.connect(self.save_screenshot)
         self.save_btn.setEnabled(False)
         
@@ -74,7 +74,7 @@ class ScreenshotWidget(QWidget):
     def take_screenshot(self):
         """Запрос скриншота с определенным качеством"""
         quality = self.settings_screenshot.get('quality', 85)
-        self.log_callback(f"📸 Запрос скриншота (качество: {quality}%)")
+        self.log_callback(f"[Скриншот] Запрос (качество: {quality}%)")
         
         future = asyncio.run_coroutine_threadsafe(
             self.ws_server.send_command(self.client_id, f"screenshot_quality:{quality}"), 
@@ -86,10 +86,10 @@ class ScreenshotWidget(QWidget):
         if checked:
             delay = self.settings_screenshot.get('refresh_delay', 5) * 1000  # convert to milliseconds
             self.auto_refresh_timer.start(delay)
-            self.log_callback(f"🔄 Автообновление включено (каждые {self.settings_screenshot.get('refresh_delay', 5)} сек)")
+            self.log_callback(f"Автообновление включено (каждые {self.settings_screenshot.get('refresh_delay', 5)} сек)")
         else:
             self.auto_refresh_timer.stop()
-            self.log_callback("🔄 Автообновление выключено")
+            self.log_callback("Автообновление выключено")
     
     def update_screenshot(self, image_data, quality, timestamp):
         """Обновление отображаемого скриншота"""
@@ -134,7 +134,7 @@ class ScreenshotWidget(QWidget):
             return
             
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "💾 Сохранить скриншот", 
+            self, "Сохранить скриншот", 
             f"screenshot_{QDateTime.currentDateTime().toString('yyyyMMdd_hhmmss')}.png",
             "Images (*.png *.jpg *.jpeg)"
         )
