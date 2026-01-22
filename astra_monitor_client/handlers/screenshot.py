@@ -29,11 +29,37 @@ class ScreenshotHandler:
                 logging.error("Ошибка runuser: %s", e)
                 return None
 
+        def get_primary_geometry():
+            try:
+                result = subprocess.run(['xrandr', '--query'], capture_output=True, text=True)
+                for line in result.stdout.splitlines():
+                    if " connected primary " in line:
+                        parts = line.split()
+                        for part in parts:
+                            if "+" in part and "x" in part:
+                                size, x, y = part.split("+")
+                                w, h = size.split("x")
+                                return int(w), int(h), int(x), int(y)
+                for line in result.stdout.splitlines():
+                    if " connected " in line:
+                        parts = line.split()
+                        for part in parts:
+                            if "+" in part and "x" in part:
+                                size, x, y = part.split("+")
+                                w, h = size.split("x")
+                                return int(w), int(h), int(x), int(y)
+            except Exception:
+                return None
+            return None
+
         try:
             quality = force_quality if force_quality is not None else self.client.screenshot_settings["quality"]
+            monitor_mode = self.client.screenshot_settings.get("monitor_mode", "all")
             user, display, uid = get_active_graphical_session()
             if not (user and display and uid):
                 return {"error": "❌ Не найдено активной графической сессии"}
+
+            geometry = get_primary_geometry() if monitor_mode == "primary" else None
 
             try:
                 subprocess.run(["xhost", "+SI:localuser:root"], timeout=5, capture_output=False)
@@ -43,7 +69,11 @@ class ScreenshotHandler:
                 pass
 
             try:
-                import_cmd = ['import', '-window', 'root', 'png:-']
+                import_cmd = ['import', '-window', 'root']
+                if geometry:
+                    w, h, x, y = geometry
+                    import_cmd += ['-crop', f'{w}x{h}+{x}+{y}']
+                import_cmd += ['png:-']
                 result = run_as_user(user, display, uid, import_cmd, timeout=15, capture_output=True)
                 if result and result.returncode == 0 and result.stdout:
                     img_data = result.stdout
@@ -64,7 +94,11 @@ class ScreenshotHandler:
                 xwd_cmd = ['xwd', '-root', '-silent']
                 result = run_as_user(user, display, uid, xwd_cmd, timeout=15, capture_output=True)
                 if result and result.returncode == 0 and result.stdout:
-                    convert_cmd = ['convert', 'xwd:-', 'png:-']
+                    convert_cmd = ['convert', 'xwd:-']
+                    if geometry:
+                        w, h, x, y = geometry
+                        convert_cmd += ['-crop', f'{w}x{h}+{x}+{y}']
+                    convert_cmd += ['png:-']
                     convert_result = run_as_user(user, display, uid, convert_cmd, timeout=10, capture_output=True)
                     if convert_result and convert_result.returncode == 0 and convert_result.stdout:
                         img_data = convert_result.stdout
@@ -78,11 +112,20 @@ class ScreenshotHandler:
 
             if shutil.which("ffmpeg"):
                 try:
-                    ffmpeg_cmd = [
-                        'ffmpeg', '-f', 'x11grab', '-video_size', '1920x1080', '-i', display,
-                        '-vframes', '1', '-q:v', str(max(1, 31 - quality // 3)),
-                        '-f', 'image2pipe', '-c:v', 'mjpeg', '-'
-                    ]
+                    if geometry:
+                        w, h, x, y = geometry
+                        ffmpeg_input = f"{display}+{x},{y}"
+                        ffmpeg_cmd = [
+                            'ffmpeg', '-f', 'x11grab', '-video_size', f'{w}x{h}', '-i', ffmpeg_input,
+                            '-vframes', '1', '-q:v', str(max(1, 31 - quality // 3)),
+                            '-f', 'image2pipe', '-c:v', 'mjpeg', '-'
+                        ]
+                    else:
+                        ffmpeg_cmd = [
+                            'ffmpeg', '-f', 'x11grab', '-video_size', '1920x1080', '-i', display,
+                            '-vframes', '1', '-q:v', str(max(1, 31 - quality // 3)),
+                            '-f', 'image2pipe', '-c:v', 'mjpeg', '-'
+                        ]
                     result = run_as_user(user, display, uid, ffmpeg_cmd, timeout=15, capture_output=True)
                     if result and result.returncode == 0 and result.stdout:
                         img_data = result.stdout
@@ -101,7 +144,11 @@ class ScreenshotHandler:
                     if result and result.returncode == 0 and result.stdout:
                         img_data = result.stdout
                         if quality < 100:
-                            convert_cmd = ['convert', 'png:-', '-quality', str(quality), 'jpg:-']
+                            convert_cmd = ['convert', 'png:-']
+                            if geometry:
+                                w, h, x, y = geometry
+                                convert_cmd += ['-crop', f'{w}x{h}+{x}+{y}']
+                            convert_cmd += ['-quality', str(quality), 'jpg:-']
                             convert_result = run_as_user(user, display, uid, convert_cmd, timeout=5, capture_output=True)
                             if convert_result and convert_result.returncode == 0 and convert_result.stdout:
                                 img_data = convert_result.stdout
@@ -119,7 +166,11 @@ class ScreenshotHandler:
                 if result and result.returncode == 0 and result.stdout:
                     img_data = result.stdout
                     if quality < 100:
-                        convert_cmd = ['convert', 'png:-', '-quality', str(quality), 'jpg:-']
+                        convert_cmd = ['convert', 'png:-']
+                        if geometry:
+                            w, h, x, y = geometry
+                            convert_cmd += ['-crop', f'{w}x{h}+{x}+{y}']
+                        convert_cmd += ['-quality', str(quality), 'jpg:-']
                         convert_result = run_as_user(user, display, uid, convert_cmd, timeout=5, capture_output=True)
                         if convert_result and convert_result.returncode == 0 and convert_result.stdout:
                             img_data = convert_result.stdout

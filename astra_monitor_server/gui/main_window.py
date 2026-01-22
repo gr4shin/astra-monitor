@@ -15,9 +15,13 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTr
                              QPushButton, QLabel, QTextEdit, QHeaderView, QMessageBox, QInputDialog, QFileDialog,
                              QTabWidget, QGroupBox, QAbstractItemView, QDialog, QStackedWidget, QStatusBar, QFormLayout, QSpinBox, QDialogButtonBox, QProgressDialog,
                              QListWidget, QListView, QListWidgetItem, QMenu, QSystemTrayIcon, QApplication, QComboBox,
-                             QLineEdit, QCheckBox)
+                             QLineEdit, QCheckBox, QSlider)
 from PyQt5.QtCore import pyqtSignal, Qt, QSize, QTimer, QVariant
-from PyQt5.QtGui import QPixmap, QIcon, QBrush, QColor
+from PyQt5.QtGui import QPixmap, QIcon, QBrush, QColor, QPainter, QLinearGradient, QPen, QFont, QImage
+try:
+    from PyQt5.QtSvg import QSvgRenderer
+except ImportError:
+    QSvgRenderer = None
 from concurrent.futures import ThreadPoolExecutor
 
 # Импортируем локальные модули
@@ -25,6 +29,8 @@ from ..config_loader import APP_CONFIG
 from ..server.websocket_server import WebSocketServer
 from .client_detail_tab import ClientDetailTab
 from .custom_items import SortableTreeWidgetItem
+from .icon_utils import load_icon_from_assets
+from .widgets.toast import Toast
 
 
 # --- Custom Log Handler ---
@@ -43,7 +49,7 @@ class QtLogHandler(logging.Handler):
 
 class ServerSettingsDialog(QDialog):
     """Диалог для настроек сервера."""
-    def __init__(self, parent=None, current_interval=10, current_quality=30, current_max_size=100, current_chunk_size=4, current_theme='light'):
+    def __init__(self, parent=None, current_interval=10, current_quality=30, current_max_size=100, current_chunk_size=4, current_theme='light', current_grid_card_size=260):
         super().__init__(parent)
         self.setWindowTitle("Настройки сервера")
         layout = QVBoxLayout(self)
@@ -51,7 +57,9 @@ class ServerSettingsDialog(QDialog):
 
         # Настройка темы
         self.theme_combo = QComboBox()
-        self.theme_combo.addItems(['light', 'dark'])
+        self.theme_combo.addItems(['light', 'midnight', 'sand', 'graphite'])
+        if current_theme not in ['light', 'midnight', 'sand', 'graphite']:
+            current_theme = 'light'
         self.theme_combo.setCurrentText(current_theme)
         form_layout.addRow("Тема:", self.theme_combo)
 
@@ -68,6 +76,12 @@ class ServerSettingsDialog(QDialog):
         self.grid_interval_spinbox.setValue(current_interval)
         self.grid_interval_spinbox.setSuffix(" сек")
         form_layout.addRow("Интервал обновления сетки:", self.grid_interval_spinbox)
+
+        self.grid_card_size_spinbox = QSpinBox()
+        self.grid_card_size_spinbox.setRange(160, 520)
+        self.grid_card_size_spinbox.setValue(current_grid_card_size)
+        self.grid_card_size_spinbox.setSuffix(" px")
+        form_layout.addRow("Размер карточки сетки:", self.grid_card_size_spinbox)
 
         # Настройки WebSocket
         self.max_size_spinbox = QSpinBox()
@@ -95,7 +109,8 @@ class ServerSettingsDialog(QDialog):
             'quality': self.grid_quality_spinbox.value(),
             'max_size': self.max_size_spinbox.value(),
             'chunk_size': self.chunk_size_spinbox.value(),
-            'theme': self.theme_combo.currentText()
+            'theme': self.theme_combo.currentText(),
+            'grid_card_size': self.grid_card_size_spinbox.value()
         }
 
 class ServerGUI(QMainWindow):
@@ -116,6 +131,7 @@ class ServerGUI(QMainWindow):
             "disk": deque(maxlen=120),
         })
         self.scheduled_tasks = []
+        self._toasts = []
         self.file_processing_executor = ThreadPoolExecutor(max_workers=os.cpu_count() or 2)
         self.load_settings()
         self.apply_theme()
@@ -130,9 +146,7 @@ class ServerGUI(QMainWindow):
         self.setup_logging()
         self.setup_tray_icon()
 
-        placeholder_pixmap = QPixmap(self.clients_grid.iconSize())
-        placeholder_pixmap.fill(QColor("#2b2b2b")) # Цвет фона виджета скриншота
-        self.placeholder_icon = QIcon(placeholder_pixmap)
+        self.placeholder_icon = self._build_placeholder_icon(self.clients_grid.iconSize())
 
         self._setup_message_handlers()
         self.setup_websocket_server()
@@ -140,118 +154,979 @@ class ServerGUI(QMainWindow):
     def apply_theme(self):
         """Применяет выбранную тему к приложению."""
         app = QApplication.instance()
-        if self.theme == 'dark':
-            app.setStyleSheet("")
-            return
-
-        app.setStyleSheet("""
-            QWidget {
-                background-color: #f4f6fb;
-                color: #1f2937;
-                border: none;
-                font-family: "Segoe UI", "Ubuntu", "Helvetica Neue", sans-serif;
-                font-size: 12px;
-            }
-            QGroupBox {
-                background-color: #ffffff;
-                border: 1px solid #e5e7eb;
-                border-radius: 8px;
-                margin-top: 10px;
-                padding: 8px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 12px;
-                padding: 0 6px;
-                color: #111827;
-                font-weight: 600;
-            }
-            QHeaderView::section {
-                background-color: #f9fafb;
-                color: #374151;
-                padding: 6px;
-                border: 1px solid #e5e7eb;
-                font-weight: 600;
-            }
-            QTabWidget::pane {
-                border: 1px solid #e5e7eb;
-                border-radius: 8px;
-                background: #ffffff;
-            }
-            QTabBar::tab {
-                background: #eef2ff;
-                color: #374151;
-                border: 1px solid #e5e7eb;
-                border-bottom: none;
-                padding: 8px 12px;
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-                margin-right: 4px;
-            }
-            QTabBar::tab:selected {
-                background: #ffffff;
-                color: #111827;
-            }
-            QTreeWidget, QListWidget, QTreeView, QTableWidget {
-                background-color: #ffffff;
-                color: #111827;
-                border: 1px solid #e5e7eb;
-                border-radius: 8px;
-            }
-            QPushButton {
-                background-color: #2563eb;
-                color: #ffffff;
-                border: none;
-                padding: 6px 12px;
-                border-radius: 6px;
-            }
-            QPushButton:hover {
-                background-color: #1d4ed8;
-            }
-            QPushButton:pressed {
-                background-color: #1e40af;
-            }
-            QLineEdit, QTextEdit, QSpinBox, QComboBox {
-                background-color: #ffffff;
-                color: #111827;
-                border: 1px solid #e5e7eb;
-                border-radius: 6px;
-                padding: 4px 6px;
-            }
-            QCheckBox::indicator {
-                border: 1px solid #cbd5f5;
-                background-color: #ffffff;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #2563eb;
-            }
-            QSplitter::handle {
-                background: #e5e7eb;
-            }
-            QMenuBar {
-                background-color: #ffffff;
-                color: #111827;
-            }
-            QMenuBar::item:selected {
-                background: #e5e7eb;
-            }
+        themes = {
+            "light": """
+                QWidget {
+                    background-color: #f4f6fb;
+                    color: #1f2937;
+                    border: none;
+                    font-family: "Segoe UI", "Ubuntu", "Helvetica Neue", sans-serif;
+                    font-size: 12px;
+                }
+                QLabel {
+                    background: transparent;
+                }
+                QCheckBox, QRadioButton {
+                    background: transparent;
+                }
+                QGroupBox {
+                    background-color: #ffffff;
+                    border: 1px solid #e5e7eb;
+                    border-radius: 10px;
+                    margin-top: 10px;
+                    padding: 8px;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin;
+                    left: 12px;
+                    padding: 0 6px;
+                    color: #111827;
+                    font-weight: 600;
+                }
+                QHeaderView::section {
+                    background-color: #f9fafb;
+                    color: #374151;
+                    padding: 6px;
+                    border: 1px solid #e5e7eb;
+                    font-weight: 600;
+                }
+                QTabWidget::pane {
+                    border: 1px solid #e5e7eb;
+                    border-radius: 10px;
+                    background: #ffffff;
+                }
+                QTabBar::tab {
+                    background: #eef2ff;
+                    color: #374151;
+                    border: 1px solid #e5e7eb;
+                    border-bottom: none;
+                    padding: 8px 12px;
+                    border-top-left-radius: 10px;
+                    border-top-right-radius: 10px;
+                    margin-right: 4px;
+                }
+                QTabBar::tab:selected {
+                    background: #ffffff;
+                    color: #111827;
+                }
+                QTabBar::close-button {
+                    image: url(__CLOSE_ICON__);
+                    subcontrol-position: right;
+                    margin: 8px;
+                    width: 12px;
+                    height: 12px;
+                }
+                QTabBar::close-button:hover {
+                    background: #e2e8f0;
+                    border-radius: 6px;
+                }
+                QTreeWidget, QListWidget, QTreeView, QTableWidget {
+                    background-color: #ffffff;
+                    color: #111827;
+                    border: 1px solid #e5e7eb;
+                    border-radius: 10px;
+                }
+                #clientsGrid::item {
+                    border: 1px solid #e5e7eb;
+                    border-radius: 12px;
+                    padding: 6px;
+                    margin: 4px;
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #ffffff, stop:1 #f8fafc);
+                    color: #1f2937;
+                    font-size: 11px;
+                }
+                #clientsGrid::item:selected {
+                    border: 1px solid #2563eb;
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #eff6ff, stop:1 #e0f2fe);
+                    color: #1f2937;
+                }
+                QPushButton {
+                    background-color: #ffffff;
+                    color: #1f2937;
+                    border: 1px solid #e5e7eb;
+                    padding: 6px 12px;
+                    border-radius: 8px;
+                    qproperty-iconSize: 18px 18px;
+                }
+                QPushButton:hover {
+                    background-color: #f1f5f9;
+                }
+                QPushButton:pressed {
+                    background-color: #e2e8f0;
+                }
+                QPushButton:checked {
+                    border: 1px solid #2563eb;
+                    background-color: #eff6ff;
+                }
+                QLineEdit, QTextEdit, QSpinBox, QComboBox {
+                    background-color: #ffffff;
+                    color: #111827;
+                    border: 1px solid #e5e7eb;
+                    border-radius: 6px;
+                    padding: 4px 6px;
+                }
+                QComboBox::drop-down {
+                    border-left: 1px solid #e5e7eb;
+                    width: 20px;
+                }
+                QSpinBox::up-button, QSpinBox::down-button {
+                    width: 18px;
+                    border-left: 1px solid #e5e7eb;
+                    background: #f8fafc;
+                }
+                QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+                    background: #e2e8f0;
+                }
+                QSpinBox::up-arrow, QSpinBox::down-arrow,
+                QComboBox::down-arrow {
+                    width: 8px;
+                    height: 8px;
+                }
+                QSpinBox::up-arrow {
+                    image: url(__ARROW_UP__);
+                }
+                QSpinBox::down-arrow, QComboBox::down-arrow {
+                    image: url(__ARROW_DOWN__);
+                }
+                QCheckBox::indicator {
+                    width: 14px;
+                    height: 14px;
+                    border-radius: 4px;
+                    border: 1px solid #cbd5f5;
+                    background-color: #ffffff;
+                }
+                QCheckBox::indicator:checked {
+                    background-color: #2563eb;
+                }
+                QRadioButton::indicator {
+                    width: 14px;
+                    height: 14px;
+                    border-radius: 7px;
+                    border: 1px solid #cbd5f5;
+                    background-color: #ffffff;
+                }
+                QRadioButton::indicator:checked {
+                    background-color: #2563eb;
+                }
+                QScrollBar:vertical {
+                    background: #eef2ff;
+                    width: 10px;
+                    margin: 2px;
+                    border-radius: 5px;
+                }
+                QScrollBar::handle:vertical {
+                    background: #94a3b8;
+                    min-height: 20px;
+                    border-radius: 5px;
+                }
+                QScrollBar::handle:vertical:hover {
+                    background: #64748b;
+                }
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                    height: 0px;
+                }
+                QScrollBar:horizontal {
+                    background: #eef2ff;
+                    height: 10px;
+                    margin: 2px;
+                    border-radius: 5px;
+                }
+                QScrollBar::handle:horizontal {
+                    background: #94a3b8;
+                    min-width: 20px;
+                    border-radius: 5px;
+                }
+                QScrollBar::handle:horizontal:hover {
+                    background: #64748b;
+                }
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                    width: 0px;
+                }
+                QSplitter::handle {
+                    background: #e5e7eb;
+                }
+                QMenuBar {
+                    background-color: #ffffff;
+                    color: #111827;
+                }
+                QMenuBar::item:selected {
+                    background: #e5e7eb;
+                }
             QMenu {
                 background-color: #ffffff;
                 color: #111827;
                 border: 1px solid #e5e7eb;
+                padding: 6px;
             }
             QMenu::item:selected {
                 background-color: #e5e7eb;
             }
-            QStatusBar {
-                background-color: #ffffff;
-                color: #374151;
+            QMenu::item {
+                padding: 8px 16px 8px 16px;
+                border-radius: 6px;
+                background: transparent;
             }
-            QMessageBox, QDialog {
-                background-color: #ffffff;
-                color: #111827;
+            QMenu::icon {
+                left: 6px;
+                width: 12px;
+                height: 12px;
             }
-        """)
+            QMenu::item:disabled {
+                color: #9ca3af;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: #e5e7eb;
+                margin: 6px 10px;
+            }
+                QStatusBar {
+                    background-color: #ffffff;
+                    color: #374151;
+                }
+                QMessageBox, QDialog {
+                    background-color: #ffffff;
+                    color: #111827;
+                }
+                QMessageBox QLabel#qt_msgboxex_icon {
+                    width: 0px;
+                    height: 0px;
+                }
+            """,
+            "midnight": """
+                QWidget {
+                    background-color: #0f172a;
+                    color: #e2e8f0;
+                    border: none;
+                    font-family: "Segoe UI", "Ubuntu", "Helvetica Neue", sans-serif;
+                    font-size: 12px;
+                }
+                QLabel {
+                    background: transparent;
+                }
+                QCheckBox, QRadioButton {
+                    background: transparent;
+                }
+                QGroupBox {
+                    background-color: #111827;
+                    border: 1px solid #1f2937;
+                    border-radius: 10px;
+                    margin-top: 10px;
+                    padding: 8px;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin;
+                    left: 12px;
+                    padding: 0 6px;
+                    color: #e2e8f0;
+                    font-weight: 600;
+                }
+                QHeaderView::section {
+                    background-color: #111827;
+                    color: #cbd5f5;
+                    padding: 6px;
+                    border: 1px solid #1f2937;
+                    font-weight: 600;
+                }
+                QTabWidget::pane {
+                    border: 1px solid #1f2937;
+                    border-radius: 10px;
+                    background: #0f172a;
+                }
+                QTabBar::tab {
+                    background: #111827;
+                    color: #94a3b8;
+                    border: 1px solid #1f2937;
+                    border-bottom: none;
+                    padding: 8px 12px;
+                    border-top-left-radius: 10px;
+                    border-top-right-radius: 10px;
+                    margin-right: 4px;
+                }
+                QTabBar::tab:selected {
+                    background: #0f172a;
+                    color: #e2e8f0;
+                }
+                QTabBar::close-button {
+                    image: url(__CLOSE_ICON__);
+                    subcontrol-position: right;
+                    margin: 8px;
+                    width: 12px;
+                    height: 12px;
+                }
+                QTabBar::close-button:hover {
+                    background: #1e293b;
+                    border-radius: 6px;
+                }
+                QTreeWidget, QListWidget, QTreeView, QTableWidget {
+                    background-color: #0b1220;
+                    color: #e2e8f0;
+                    border: 1px solid #1f2937;
+                    border-radius: 10px;
+                }
+                #clientsGrid::item {
+                    border: 1px solid #1f2937;
+                    border-radius: 12px;
+                    padding: 6px;
+                    margin: 4px;
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #111827, stop:1 #0b1220);
+                    color: #e2e8f0;
+                    font-size: 11px;
+                }
+                #clientsGrid::item:selected {
+                    border: 1px solid #38bdf8;
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #1e293b, stop:1 #0f172a);
+                    color: #e2e8f0;
+                }
+                QPushButton {
+                    background-color: #111827;
+                    color: #e2e8f0;
+                    border: 1px solid #1f2937;
+                    padding: 6px 12px;
+                    border-radius: 8px;
+                    qproperty-iconSize: 18px 18px;
+                }
+                QPushButton:hover {
+                    background-color: #1e293b;
+                }
+                QPushButton:pressed {
+                    background-color: #0f172a;
+                }
+                QPushButton:checked {
+                    border: 1px solid #38bdf8;
+                    background-color: #1e293b;
+                }
+                QLineEdit, QTextEdit, QSpinBox, QComboBox {
+                    background-color: #0f172a;
+                    color: #e2e8f0;
+                    border: 1px solid #1f2937;
+                    border-radius: 6px;
+                    padding: 4px 6px;
+                }
+                QComboBox::drop-down {
+                    border-left: 1px solid #1f2937;
+                    width: 20px;
+                }
+                QSpinBox::up-button, QSpinBox::down-button {
+                    width: 18px;
+                    border-left: 1px solid #1f2937;
+                    background: #0b1220;
+                }
+                QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+                    background: #1e293b;
+                }
+                QSpinBox::up-arrow, QSpinBox::down-arrow,
+                QComboBox::down-arrow {
+                    width: 8px;
+                    height: 8px;
+                }
+                QSpinBox::up-arrow {
+                    image: url(__ARROW_UP__);
+                }
+                QSpinBox::down-arrow, QComboBox::down-arrow {
+                    image: url(__ARROW_DOWN__);
+                }
+                QCheckBox::indicator {
+                    width: 14px;
+                    height: 14px;
+                    border-radius: 4px;
+                    border: 1px solid #1f2937;
+                    background-color: #0f172a;
+                }
+                QCheckBox::indicator:checked {
+                    background-color: #0ea5e9;
+                }
+                QRadioButton::indicator {
+                    width: 14px;
+                    height: 14px;
+                    border-radius: 7px;
+                    border: 1px solid #1f2937;
+                    background-color: #0f172a;
+                }
+                QRadioButton::indicator:checked {
+                    background-color: #38bdf8;
+                }
+                QScrollBar:vertical {
+                    background: #0b1220;
+                    width: 10px;
+                    margin: 2px;
+                    border-radius: 5px;
+                }
+                QScrollBar::handle:vertical {
+                    background: #334155;
+                    min-height: 20px;
+                    border-radius: 5px;
+                }
+                QScrollBar::handle:vertical:hover {
+                    background: #475569;
+                }
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                    height: 0px;
+                }
+                QScrollBar:horizontal {
+                    background: #0b1220;
+                    height: 10px;
+                    margin: 2px;
+                    border-radius: 5px;
+                }
+                QScrollBar::handle:horizontal {
+                    background: #334155;
+                    min-width: 20px;
+                    border-radius: 5px;
+                }
+                QScrollBar::handle:horizontal:hover {
+                    background: #475569;
+                }
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                    width: 0px;
+                }
+                QSplitter::handle {
+                    background: #1f2937;
+                }
+                QMenuBar {
+                    background-color: #0f172a;
+                    color: #e2e8f0;
+                }
+                QMenuBar::item:selected {
+                    background: #1f2937;
+                }
+            QMenu {
+                background-color: #111827;
+                color: #e2e8f0;
+                border: 1px solid #1f2937;
+                padding: 6px;
+            }
+            QMenu::item:selected {
+                background-color: #1f2937;
+            }
+            QMenu::item {
+                padding: 8px 16px 8px 16px;
+                border-radius: 6px;
+                background: transparent;
+            }
+            QMenu::icon {
+                left: 6px;
+                width: 12px;
+                height: 12px;
+            }
+            QMenu::item:disabled {
+                color: #64748b;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: #1f2937;
+                margin: 6px 10px;
+            }
+                QStatusBar {
+                    background-color: #0f172a;
+                    color: #cbd5f5;
+                }
+                QMessageBox, QDialog {
+                    background-color: #111827;
+                    color: #e2e8f0;
+                }
+                QMessageBox QLabel#qt_msgboxex_icon {
+                    width: 0px;
+                    height: 0px;
+                }
+            """,
+            "sand": """
+                QWidget {
+                    background-color: #f8f4ef;
+                    color: #3f3a2f;
+                    border: none;
+                    font-family: "Segoe UI", "Ubuntu", "Helvetica Neue", sans-serif;
+                    font-size: 12px;
+                }
+                QLabel {
+                    background: transparent;
+                }
+                QCheckBox, QRadioButton {
+                    background: transparent;
+                }
+                QGroupBox {
+                    background-color: #fffaf2;
+                    border: 1px solid #eadfce;
+                    border-radius: 10px;
+                    margin-top: 10px;
+                    padding: 8px;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin;
+                    left: 12px;
+                    padding: 0 6px;
+                    color: #4b4031;
+                    font-weight: 600;
+                }
+                QHeaderView::section {
+                    background-color: #f6efe6;
+                    color: #4b4031;
+                    padding: 6px;
+                    border: 1px solid #eadfce;
+                    font-weight: 600;
+                }
+                QTabWidget::pane {
+                    border: 1px solid #eadfce;
+                    border-radius: 10px;
+                    background: #fffaf2;
+                }
+                QTabBar::tab {
+                    background: #f3e9dc;
+                    color: #6b5a44;
+                    border: 1px solid #eadfce;
+                    border-bottom: none;
+                    padding: 8px 12px;
+                    border-top-left-radius: 10px;
+                    border-top-right-radius: 10px;
+                    margin-right: 4px;
+                }
+                QTabBar::tab:selected {
+                    background: #fffaf2;
+                    color: #3f3a2f;
+                }
+                QTabBar::close-button {
+                    image: url(__CLOSE_ICON__);
+                    subcontrol-position: right;
+                    margin: 8px;
+                    width: 12px;
+                    height: 12px;
+                }
+                QTabBar::close-button:hover {
+                    background: #eadfce;
+                    border-radius: 6px;
+                }
+                QTreeWidget, QListWidget, QTreeView, QTableWidget {
+                    background-color: #fffaf2;
+                    color: #3f3a2f;
+                    border: 1px solid #eadfce;
+                    border-radius: 10px;
+                }
+                #clientsGrid::item {
+                    border: 1px solid #eadfce;
+                    border-radius: 12px;
+                    padding: 6px;
+                    margin: 4px;
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #fffaf2, stop:1 #f4eadb);
+                    color: #3f3a2f;
+                    font-size: 11px;
+                }
+                #clientsGrid::item:selected {
+                    border: 1px solid #d97706;
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #fff1d6, stop:1 #f7e1b5);
+                    color: #3f3a2f;
+                }
+                QPushButton {
+                    background-color: #fffaf2;
+                    color: #3f3a2f;
+                    border: 1px solid #eadfce;
+                    padding: 6px 12px;
+                    border-radius: 8px;
+                    qproperty-iconSize: 18px 18px;
+                }
+                QPushButton:hover {
+                    background-color: #f6efe6;
+                }
+                QPushButton:pressed {
+                    background-color: #eadfce;
+                }
+                QPushButton:checked {
+                    border: 1px solid #d97706;
+                    background-color: #fff1d6;
+                }
+                QLineEdit, QTextEdit, QSpinBox, QComboBox {
+                    background-color: #fffaf2;
+                    color: #3f3a2f;
+                    border: 1px solid #eadfce;
+                    border-radius: 6px;
+                    padding: 4px 6px;
+                }
+                QComboBox::drop-down {
+                    border-left: 1px solid #eadfce;
+                    width: 20px;
+                }
+                QSpinBox::up-button, QSpinBox::down-button {
+                    width: 18px;
+                    border-left: 1px solid #eadfce;
+                    background: #f6efe6;
+                }
+                QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+                    background: #eadfce;
+                }
+                QSpinBox::up-arrow, QSpinBox::down-arrow,
+                QComboBox::down-arrow {
+                    width: 8px;
+                    height: 8px;
+                }
+                QSpinBox::up-arrow {
+                    image: url(__ARROW_UP__);
+                }
+                QSpinBox::down-arrow, QComboBox::down-arrow {
+                    image: url(__ARROW_DOWN__);
+                }
+                QCheckBox::indicator {
+                    width: 14px;
+                    height: 14px;
+                    border-radius: 4px;
+                    border: 1px solid #eadfce;
+                    background-color: #fffaf2;
+                }
+                QCheckBox::indicator:checked {
+                    background-color: #d97706;
+                }
+                QRadioButton::indicator {
+                    width: 14px;
+                    height: 14px;
+                    border-radius: 7px;
+                    border: 1px solid #eadfce;
+                    background-color: #fffaf2;
+                }
+                QRadioButton::indicator:checked {
+                    background-color: #d97706;
+                }
+                QScrollBar:vertical {
+                    background: #f3e9dc;
+                    width: 10px;
+                    margin: 2px;
+                    border-radius: 5px;
+                }
+                QScrollBar::handle:vertical {
+                    background: #c7b299;
+                    min-height: 20px;
+                    border-radius: 5px;
+                }
+                QScrollBar::handle:vertical:hover {
+                    background: #a98d6c;
+                }
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                    height: 0px;
+                }
+                QScrollBar:horizontal {
+                    background: #f3e9dc;
+                    height: 10px;
+                    margin: 2px;
+                    border-radius: 5px;
+                }
+                QScrollBar::handle:horizontal {
+                    background: #c7b299;
+                    min-width: 20px;
+                    border-radius: 5px;
+                }
+                QScrollBar::handle:horizontal:hover {
+                    background: #a98d6c;
+                }
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                    width: 0px;
+                }
+                QSplitter::handle {
+                    background: #eadfce;
+                }
+                QMenuBar {
+                    background-color: #fffaf2;
+                    color: #3f3a2f;
+                }
+                QMenuBar::item:selected {
+                    background: #eadfce;
+                }
+            QMenu {
+                background-color: #fffaf2;
+                color: #3f3a2f;
+                border: 1px solid #eadfce;
+                padding: 6px;
+            }
+            QMenu::item:selected {
+                background-color: #eadfce;
+            }
+            QMenu::item {
+                padding: 8px 16px 8px 16px;
+                border-radius: 6px;
+                background: transparent;
+            }
+            QMenu::icon {
+                left: 6px;
+                width: 12px;
+                height: 12px;
+            }
+            QMenu::item:disabled {
+                color: #a89986;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: #eadfce;
+                margin: 6px 10px;
+            }
+                QStatusBar {
+                    background-color: #fffaf2;
+                    color: #6b5a44;
+                }
+                QMessageBox, QDialog {
+                    background-color: #fffaf2;
+                    color: #3f3a2f;
+                }
+                QMessageBox QLabel#qt_msgboxex_icon {
+                    width: 0px;
+                    height: 0px;
+                }
+            """,
+            "graphite": """
+                QWidget {
+                    background-color: #111111;
+                    color: #e5e5e5;
+                    border: none;
+                    font-family: "Segoe UI", "Ubuntu", "Helvetica Neue", sans-serif;
+                    font-size: 12px;
+                }
+                QLabel {
+                    background: transparent;
+                }
+                QCheckBox, QRadioButton {
+                    background: transparent;
+                }
+                QGroupBox {
+                    background-color: #1a1a1a;
+                    border: 1px solid #2a2a2a;
+                    border-radius: 10px;
+                    margin-top: 10px;
+                    padding: 8px;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin;
+                    left: 12px;
+                    padding: 0 6px;
+                    color: #f5f5f5;
+                    font-weight: 600;
+                }
+                QHeaderView::section {
+                    background-color: #1a1a1a;
+                    color: #cfcfcf;
+                    padding: 6px;
+                    border: 1px solid #2a2a2a;
+                    font-weight: 600;
+                }
+                QTabWidget::pane {
+                    border: 1px solid #2a2a2a;
+                    border-radius: 10px;
+                    background: #111111;
+                }
+                QTabBar::tab {
+                    background: #1f1f1f;
+                    color: #9ca3af;
+                    border: 1px solid #2a2a2a;
+                    border-bottom: none;
+                    padding: 8px 12px;
+                    border-top-left-radius: 10px;
+                    border-top-right-radius: 10px;
+                    margin-right: 4px;
+                }
+                QTabBar::tab:selected {
+                    background: #111111;
+                    color: #f3f4f6;
+                }
+                QTabBar::close-button {
+                    image: url(__CLOSE_ICON__);
+                    subcontrol-position: right;
+                    margin: 8px;
+                    width: 12px;
+                    height: 12px;
+                }
+                QTabBar::close-button:hover {
+                    background: #2a2a2a;
+                    border-radius: 6px;
+                }
+                QTreeWidget, QListWidget, QTreeView, QTableWidget {
+                    background-color: #111111;
+                    color: #e5e5e5;
+                    border: 1px solid #2a2a2a;
+                    border-radius: 10px;
+                }
+                #clientsGrid::item {
+                    border: 1px solid #2a2a2a;
+                    border-radius: 12px;
+                    padding: 6px;
+                    margin: 4px;
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #1a1a1a, stop:1 #111111);
+                    color: #e5e5e5;
+                    font-size: 11px;
+                }
+                #clientsGrid::item:selected {
+                    border: 1px solid #22c55e;
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #0f172a, stop:1 #111111);
+                    color: #e5e5e5;
+                }
+                QPushButton {
+                    background-color: #1a1a1a;
+                    color: #e5e5e5;
+                    border: 1px solid #2a2a2a;
+                    padding: 6px 12px;
+                    border-radius: 8px;
+                    qproperty-iconSize: 18px 18px;
+                }
+                QPushButton:hover {
+                    background-color: #262626;
+                }
+                QPushButton:pressed {
+                    background-color: #0f0f0f;
+                }
+                QPushButton:checked {
+                    border: 1px solid #22c55e;
+                    background-color: #1f2937;
+                }
+                QLineEdit, QTextEdit, QSpinBox, QComboBox {
+                    background-color: #111111;
+                    color: #e5e5e5;
+                    border: 1px solid #2a2a2a;
+                    border-radius: 6px;
+                    padding: 4px 6px;
+                }
+                QComboBox::drop-down {
+                    border-left: 1px solid #2a2a2a;
+                    width: 20px;
+                }
+                QSpinBox::up-button, QSpinBox::down-button {
+                    width: 18px;
+                    border-left: 1px solid #2a2a2a;
+                    background: #1a1a1a;
+                }
+                QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+                    background: #262626;
+                }
+                QSpinBox::up-arrow, QSpinBox::down-arrow,
+                QComboBox::down-arrow {
+                    width: 8px;
+                    height: 8px;
+                }
+                QSpinBox::up-arrow {
+                    image: url(__ARROW_UP__);
+                }
+                QSpinBox::down-arrow, QComboBox::down-arrow {
+                    image: url(__ARROW_DOWN__);
+                }
+                QCheckBox::indicator {
+                    width: 14px;
+                    height: 14px;
+                    border-radius: 4px;
+                    border: 1px solid #2a2a2a;
+                    background-color: #111111;
+                }
+                QCheckBox::indicator:checked {
+                    background-color: #22c55e;
+                }
+                QRadioButton::indicator {
+                    width: 14px;
+                    height: 14px;
+                    border-radius: 7px;
+                    border: 1px solid #2a2a2a;
+                    background-color: #111111;
+                }
+                QRadioButton::indicator:checked {
+                    background-color: #22c55e;
+                }
+                QScrollBar:vertical {
+                    background: #1f1f1f;
+                    width: 10px;
+                    margin: 2px;
+                    border-radius: 5px;
+                }
+                QScrollBar::handle:vertical {
+                    background: #3f3f46;
+                    min-height: 20px;
+                    border-radius: 5px;
+                }
+                QScrollBar::handle:vertical:hover {
+                    background: #52525b;
+                }
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                    height: 0px;
+                }
+                QScrollBar:horizontal {
+                    background: #1f1f1f;
+                    height: 10px;
+                    margin: 2px;
+                    border-radius: 5px;
+                }
+                QScrollBar::handle:horizontal {
+                    background: #3f3f46;
+                    min-width: 20px;
+                    border-radius: 5px;
+                }
+                QScrollBar::handle:horizontal:hover {
+                    background: #52525b;
+                }
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                    width: 0px;
+                }
+                QSplitter::handle {
+                    background: #2a2a2a;
+                }
+                QMenuBar {
+                    background-color: #111111;
+                    color: #e5e5e5;
+                }
+                QMenuBar::item:selected {
+                    background: #2a2a2a;
+                }
+            QMenu {
+                background-color: #111111;
+                color: #e5e5e5;
+                border: 1px solid #2a2a2a;
+                padding: 6px;
+            }
+            QMenu::item:selected {
+                background-color: #2a2a2a;
+            }
+            QMenu::item {
+                padding: 8px 16px 8px 16px;
+                border-radius: 6px;
+                background: transparent;
+            }
+            QMenu::icon {
+                left: 6px;
+                width: 12px;
+                height: 12px;
+            }
+            QMenu::item:disabled {
+                color: #71717a;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: #2a2a2a;
+                margin: 6px 10px;
+            }
+                QStatusBar {
+                    background-color: #111111;
+                    color: #9ca3af;
+                }
+                QMessageBox, QDialog {
+                    background-color: #111111;
+                    color: #e5e5e5;
+                }
+                QMessageBox QLabel#qt_msgboxex_icon {
+                    width: 0px;
+                    height: 0px;
+                }
+            """
+        }
+        theme_key = self.theme
+        if theme_key == "dark":
+            theme_key = "midnight"
+        close_icon_path = self._asset_path("assets", "icons", "close.svg").replace("\\", "/")
+        arrow_up_path = self._asset_path("assets", "icons", "arrow_up.svg").replace("\\", "/")
+        arrow_down_path = self._asset_path("assets", "icons", "arrow_down.svg").replace("\\", "/")
+        theme_css = themes.get(theme_key, themes["light"])
+        theme_css = theme_css.replace("__CLOSE_ICON__", close_icon_path)
+        theme_css = theme_css.replace("__ARROW_UP__", arrow_up_path)
+        theme_css = theme_css.replace("__ARROW_DOWN__", arrow_down_path)
+        app.setStyleSheet(theme_css)
+        if hasattr(self, "refresh_btn"):
+            self._apply_action_icons()
+            self._apply_view_icons()
+            self._apply_tab_icons()
 
     def setup_logging(self):
         """Настраивает перехват логов для отображения в GUI."""
@@ -313,6 +1188,7 @@ class ServerGUI(QMainWindow):
             server_settings = settings.get('server_settings', {})
             self.grid_refresh_interval = server_settings.get('grid_refresh_interval', 10)
             self.quality_grid = server_settings.get('quality_grid', 30)
+            self.grid_card_size = server_settings.get('grid_card_size', 260)
             self.websocket_max_size_mb = server_settings.get('websocket_max_size_mb', 100)
             self.websocket_chunk_size_mb = server_settings.get('websocket_chunk_size_mb', 4)
             self.theme = server_settings.get('theme', 'light')
@@ -321,6 +1197,7 @@ class ServerGUI(QMainWindow):
             self.client_meta = {}
             self.grid_refresh_interval = 10
             self.quality_grid = 30
+            self.grid_card_size = 260
             self.websocket_max_size_mb = 100
             self.websocket_chunk_size_mb = 4
             self.theme = 'light'
@@ -334,6 +1211,7 @@ class ServerGUI(QMainWindow):
             'server_settings': {
                 'grid_refresh_interval': self.grid_refresh_interval,
                 'quality_grid': self.quality_grid,
+                'grid_card_size': self.grid_card_size,
                 'websocket_max_size_mb': self.websocket_max_size_mb,
                 'websocket_chunk_size_mb': self.websocket_chunk_size_mb,
                 'theme': self.theme
@@ -371,6 +1249,9 @@ class ServerGUI(QMainWindow):
         
         self.show_log_action = view_menu.addAction("Показать 'Системный лог'")
         self.show_log_action.triggered.connect(self.show_log_tab)
+        
+        self.show_tasks_action = view_menu.addAction("Показать 'Задачи'")
+        self.show_tasks_action.triggered.connect(self.show_tasks_tab)
 
         settings_menu = menu_bar.addMenu("Настройки")
         server_settings_action = settings_menu.addAction("Настройки сервера")
@@ -396,24 +1277,6 @@ class ServerGUI(QMainWindow):
         # 1. Вкладка со списком клиентов
         self.clients_list_tab = QWidget()
         clients_layout = QVBoxLayout(self.clients_list_tab)
-        
-        # Дерево клиентов
-        clients_group = QGroupBox("Подключенные клиенты")
-        clients_group_layout = QVBoxLayout(clients_group)
-        
-        # --- Переключатель вида ---
-        view_switcher_layout = QHBoxLayout()
-        self.list_view_btn = QPushButton("Список")
-        self.list_view_btn.setCheckable(True)
-        self.list_view_btn.setChecked(True)
-        self.grid_view_btn = QPushButton("Сетка")
-        self.grid_view_btn.setCheckable(True)
-        self.list_view_btn.clicked.connect(lambda: self.switch_view(0))
-        self.grid_view_btn.clicked.connect(lambda: self.switch_view(1))
-        view_switcher_layout.addWidget(self.list_view_btn)
-        view_switcher_layout.addWidget(self.grid_view_btn)
-        view_switcher_layout.addStretch()
-        clients_group_layout.addLayout(view_switcher_layout)
 
         # --- Панель действий ---
         actions_layout = QHBoxLayout()
@@ -438,12 +1301,47 @@ class ServerGUI(QMainWindow):
         actions_layout.addWidget(self.disconnect_btn)
         actions_layout.addStretch()
 
-        actions_layout.addWidget(QLabel("Поиск:"))
+        search_icon = load_icon_from_assets("search.svg", QColor("#64748b"), size=16)
+        if not search_icon.isNull():
+            search_label = QLabel()
+            search_label.setPixmap(search_icon.pixmap(16, 16))
+            actions_layout.addWidget(search_label)
+        else:
+            actions_layout.addWidget(QLabel("Поиск:"))
         self.client_filter_input = QLineEdit()
         self.client_filter_input.setPlaceholderText("IP, hostname, теги...")
         self.client_filter_input.textChanged.connect(self.filter_clients)
         actions_layout.addWidget(self.client_filter_input)
-        clients_group_layout.addLayout(actions_layout)
+        clients_layout.addLayout(actions_layout)
+
+        # Дерево клиентов
+        clients_group = QGroupBox("Подключенные клиенты")
+        clients_group_layout = QVBoxLayout(clients_group)
+        
+        # --- Переключатель вида ---
+        view_switcher_layout = QHBoxLayout()
+        self.list_view_btn = QPushButton("Список")
+        self.list_view_btn.setCheckable(True)
+        self.list_view_btn.setChecked(True)
+        self.grid_view_btn = QPushButton("Сетка")
+        self.grid_view_btn.setCheckable(True)
+        self.list_view_btn.clicked.connect(lambda: self.switch_view(0))
+        self.grid_view_btn.clicked.connect(lambda: self.switch_view(1))
+        view_switcher_layout.addWidget(self.list_view_btn)
+        view_switcher_layout.addWidget(self.grid_view_btn)
+        self.grid_scale_label = QLabel("Масштаб:")
+        view_switcher_layout.addWidget(self.grid_scale_label)
+        self.grid_size_slider = QSlider(Qt.Horizontal)
+        self.grid_size_slider.setRange(160, 520)
+        self.grid_size_slider.setValue(self.grid_card_size)
+        self.grid_size_slider.setFixedWidth(160)
+        self.grid_size_slider.valueChanged.connect(self.on_grid_size_changed)
+        self.grid_size_slider.sliderReleased.connect(self._save_grid_size_from_slider)
+        self.grid_size_label = QLabel(f"{self.grid_card_size}px")
+        view_switcher_layout.addWidget(self.grid_size_slider)
+        view_switcher_layout.addWidget(self.grid_size_label)
+        view_switcher_layout.addStretch()
+        clients_group_layout.addLayout(view_switcher_layout)
 
         # --- Стек для видов ---
         self.view_stack = QStackedWidget()
@@ -461,12 +1359,15 @@ class ServerGUI(QMainWindow):
 
         # --- Вид "Сетка" ---
         self.clients_grid = QListWidget()
+        self.clients_grid.setObjectName("clientsGrid")
         self.clients_grid.setViewMode(QListView.IconMode)
-        self.clients_grid.setResizeMode(QListWidget.Adjust)
+        self.clients_grid.setResizeMode(QListWidget.Fixed)
         self.clients_grid.setMovement(QListWidget.Static)
-        self.clients_grid.setIconSize(QSize(240, 180))
-        self.clients_grid.setSpacing(15)
+        self.clients_grid.setUniformItemSizes(True)
+        self.clients_grid.setIconSize(QSize(self.grid_card_size - 20, int((self.grid_card_size - 20) * 0.75)))
+        self.clients_grid.setSpacing(10)
         self.clients_grid.setWordWrap(True)
+        self.clients_grid.setTextElideMode(Qt.ElideRight)
         self.clients_grid.itemDoubleClicked.connect(self.open_client_tab_from_double_click)
         self.clients_grid.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.clients_grid.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -474,14 +1375,25 @@ class ServerGUI(QMainWindow):
         self.view_stack.addWidget(self.clients_grid)
         
         clients_group_layout.addWidget(self.view_stack)
+        self.clients_grid.setGridSize(QSize(self.grid_card_size, int(self.grid_card_size * 1.2)))
+        self._set_grid_scale_visible(False)
         
         clients_layout.addWidget(clients_group)
+        self._apply_action_icons()
+        self._apply_view_icons()
+        self._apply_grid_layout()
         
         # 2. Вкладка лога
         self.log_view_tab = QWidget()
         log_layout = QVBoxLayout(self.log_view_tab)
         log_filter_layout = QHBoxLayout()
-        log_filter_layout.addWidget(QLabel("Фильтр:"))
+        filter_icon = load_icon_from_assets("search.svg", QColor("#64748b"), size=16)
+        if not filter_icon.isNull():
+            filter_label = QLabel()
+            filter_label.setPixmap(filter_icon.pixmap(16, 16))
+            log_filter_layout.addWidget(filter_label)
+        else:
+            log_filter_layout.addWidget(QLabel("Фильтр:"))
         self.log_filter_input = QLineEdit()
         self.log_filter_input.setPlaceholderText("Поиск по логу...")
         self.log_filter_input.textChanged.connect(self.apply_log_filter)
@@ -530,6 +1442,7 @@ class ServerGUI(QMainWindow):
         self.tabs.addTab(self.clients_list_tab, "Клиенты")
         self.tabs.addTab(self.log_view_tab, "Системный лог")
         self.tabs.addTab(self.tasks_tab, "Задачи")
+        self._apply_tab_icons()
         
         main_layout.addWidget(self.tabs)
         
@@ -552,22 +1465,26 @@ class ServerGUI(QMainWindow):
         или в корневой директории проекта при запуске из исходников.
         """
         # Определяем базовый путь (рядом с .exe или в корне проекта)
-        if getattr(sys, 'frozen', False):
-            base_path = os.path.dirname(sys.executable)
+        if getattr(sys, 'frozen', False) and hasattr(sys, "_MEIPASS"):
+            base_path = sys._MEIPASS
         else:
             base_path = '.'
-        
-        icon_path = os.path.join(base_path, 'icon.ico')
-        
-        if os.path.exists(icon_path):
-            self.app_icon = QIcon(icon_path)
-            logging.info(f"Иконка приложения успешно загружена из {icon_path}")
-        else:
-            logging.warning(f"Файл иконки не найден: {icon_path}. Будет использована иконка-заглушка.")
-            # Создаем простую иконку-заглушку, если файл не найден
-            pixmap = QPixmap(64, 64)
-            pixmap.fill(Qt.gray)
-            self.app_icon = QIcon(pixmap)
+
+        icon_candidates = [
+            os.path.join(base_path, 'assets', 'icons', 'app_icon.svg'),
+            os.path.join(base_path, 'icon.ico')
+        ]
+
+        for icon_path in icon_candidates:
+            if os.path.exists(icon_path):
+                self.app_icon = QIcon(icon_path)
+                logging.info(f"Иконка приложения успешно загружена из {icon_path}")
+                return
+
+        logging.warning("Файл иконки не найден. Будет использована иконка-заглушка.")
+        pixmap = QPixmap(64, 64)
+        pixmap.fill(Qt.gray)
+        self.app_icon = QIcon(pixmap)
 
     def setup_tray_icon(self):
         """Настраивает иконку в системном трее."""
@@ -592,6 +1509,103 @@ class ServerGUI(QMainWindow):
         
         self.tray_icon.show()
 
+    def _asset_path(self, *parts):
+        if getattr(sys, 'frozen', False) and hasattr(sys, "_MEIPASS"):
+            base_path = sys._MEIPASS
+        else:
+            base_path = '.'
+        return os.path.join(base_path, *parts)
+
+    def _theme_accent_color(self):
+        theme_key = self.theme
+        if theme_key == "dark":
+            theme_key = "midnight"
+        return {
+            "light": QColor("#2563eb"),
+            "midnight": QColor("#38bdf8"),
+            "sand": QColor("#b45309"),
+            "graphite": QColor("#22c55e")
+        }.get(theme_key, QColor("#2563eb"))
+
+    def _make_tinted_icon(self, path, color):
+        if path.lower().endswith(".svg"):
+            if QSvgRenderer is None:
+                return QIcon()
+            renderer = QSvgRenderer(path)
+            if not renderer.isValid():
+                return QIcon()
+            size = renderer.defaultSize()
+            if size.isEmpty():
+                size = QSize(24, 24)
+            pixmap = QPixmap(size)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            renderer.render(painter)
+            painter.end()
+            image = pixmap.toImage()
+        else:
+            image = QImage(path)
+            if image.isNull():
+                return QIcon()
+
+        image = image.convertToFormat(QImage.Format_ARGB32)
+        tinted = QImage(image.size(), QImage.Format_ARGB32)
+        tinted.fill(color)
+        painter = QPainter(tinted)
+        painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+        painter.drawImage(0, 0, image)
+        painter.end()
+        return QIcon(QPixmap.fromImage(tinted))
+
+    def _apply_action_icons(self):
+        icon_map = {
+            self.refresh_btn: ("assets/icons/refresh.svg", QColor("#2563eb")),
+            self.message_btn: ("assets/icons/chat.svg", QColor("#0ea5e9")),
+            self.reboot_btn: ("assets/icons/restart_alt.svg", QColor("#f59e0b")),
+            self.shutdown_btn: ("assets/icons/power_settings_new.svg", QColor("#ef4444")),
+            self.update_btn: ("assets/icons/system_update_alt.svg", QColor("#22c55e")),
+            self.disconnect_btn: ("assets/icons/link_off.svg", QColor("#64748b"))
+        }
+
+        for button, (icon_rel, color) in icon_map.items():
+            icon_path = self._asset_path(*icon_rel.split("/"))
+            if os.path.exists(icon_path):
+                button.setIcon(self._make_tinted_icon(icon_path, color))
+                button.setIconSize(QSize(18, 18))
+
+    def _apply_view_icons(self):
+        accent = self._theme_accent_color()
+        icon_map = {
+            self.list_view_btn: ("list_view.svg", accent),
+            self.grid_view_btn: ("grid_view.svg", accent),
+        }
+        for button, (icon_name, color) in icon_map.items():
+            icon = load_icon_from_assets(icon_name, color, size=18)
+            if not icon.isNull():
+                button.setIcon(icon)
+                button.setIconSize(QSize(18, 18))
+
+    def _apply_tab_icons(self):
+        accent = self._theme_accent_color()
+        if hasattr(self, "tasks_tab"):
+            icon = load_icon_from_assets("checklist.svg", accent, size=16)
+            if not icon.isNull():
+                index = self.tabs.indexOf(self.tasks_tab)
+                if index != -1:
+                    self.tabs.setTabIcon(index, icon)
+        if hasattr(self, "clients_list_tab"):
+            icon = load_icon_from_assets("list_view.svg", accent, size=16)
+            if not icon.isNull():
+                index = self.tabs.indexOf(self.clients_list_tab)
+                if index != -1:
+                    self.tabs.setTabIcon(index, icon)
+        if hasattr(self, "log_view_tab"):
+            icon = load_icon_from_assets("info.svg", accent, size=16)
+            if not icon.isNull():
+                index = self.tabs.indexOf(self.log_view_tab)
+                if index != -1:
+                    self.tabs.setTabIcon(index, icon)
+
     def toggle_visibility(self):
         """Переключает видимость главного окна."""
         if self.isVisible():
@@ -608,7 +1622,7 @@ class ServerGUI(QMainWindow):
 
     def open_server_settings(self):
         """Открывает диалог настроек сервера."""
-        dialog = ServerSettingsDialog(self, self.grid_refresh_interval, self.quality_grid, self.websocket_max_size_mb, self.websocket_chunk_size_mb, self.theme)
+        dialog = ServerSettingsDialog(self, self.grid_refresh_interval, self.quality_grid, self.websocket_max_size_mb, self.websocket_chunk_size_mb, self.theme, self.grid_card_size)
         if dialog.exec_():
             values = dialog.get_values()
             new_interval = values['interval']
@@ -616,9 +1630,10 @@ class ServerGUI(QMainWindow):
             new_max_size = values['max_size']
             new_chunk_size = values['chunk_size']
             new_theme = values['theme']
+            new_card_size = values['grid_card_size']
 
             if new_chunk_size > new_max_size:
-                QMessageBox.warning(self, "Ошибка настроек", "Размер чанка не может быть больше максимального размера сообщения WebSocket.")
+                self.show_toast("Размер чанка не может быть больше максимального размера сообщения WebSocket.", level="warning")
                 return
 
             settings_changed = False
@@ -634,6 +1649,16 @@ class ServerGUI(QMainWindow):
                 logging.info(f"Интервал обновления сетки изменен на {new_interval} сек.")
                 if self.grid_refresh_timer.isActive():
                     self.grid_refresh_timer.start(self.grid_refresh_interval * 1000)
+                settings_changed = True
+
+            if self.grid_card_size != new_card_size:
+                self.grid_card_size = new_card_size
+                self._apply_grid_layout()
+                if hasattr(self, "grid_size_slider"):
+                    self.grid_size_slider.blockSignals(True)
+                    self.grid_size_slider.setValue(new_card_size)
+                    self.grid_size_slider.blockSignals(False)
+                    self.grid_size_label.setText(f"{new_card_size}px")
                 settings_changed = True
 
             if self.websocket_max_size_mb != new_max_size or self.websocket_chunk_size_mb != new_chunk_size:
@@ -653,7 +1678,7 @@ class ServerGUI(QMainWindow):
                 self.save_settings()
 
             if websocket_settings_changed:
-                QMessageBox.information(self, "Перезапуск", "Новые настройки WebSocket вступят в силу после перезапуска сервера.")
+                self.show_toast("Новые настройки WebSocket вступят в силу после перезапуска сервера.", level="warning")
 
     def show_client_context_menu(self, position):
         """Отображение контекстного меню для выбранного клиента."""
@@ -679,19 +1704,31 @@ class ServerGUI(QMainWindow):
         menu = QMenu(self)
 
         if len(selected_ids) == 1:
-            open_tab_action = menu.addAction("↗️ Открыть вкладку")
+            open_tab_action = menu.addAction("Открыть вкладку")
+            icon = load_icon_from_assets("info.svg", QColor("#0ea5e9"), size=16)
+            if not icon.isNull():
+                open_tab_action.setIcon(icon)
             open_tab_action.triggered.connect(self.open_client_tab_from_button)
             if not all_connected:
                 open_tab_action.setEnabled(False)
             menu.addSeparator()
 
         refresh_action = menu.addAction("Обновить данные")
+        icon = load_icon_from_assets("refresh.svg", QColor("#2563eb"), size=16)
+        if not icon.isNull():
+            refresh_action.setIcon(icon)
         refresh_action.triggered.connect(self.refresh_client_data)
         
         send_message_action = menu.addAction("Отправить сообщение")
+        icon = load_icon_from_assets("chat.svg", QColor("#0ea5e9"), size=16)
+        if not icon.isNull():
+            send_message_action.setIcon(icon)
         send_message_action.triggered.connect(self.send_message_to_clients)
 
-        update_action = menu.addAction("⬆️ Обновить клиент")
+        update_action = menu.addAction("Обновить клиент")
+        icon = load_icon_from_assets("system_update_alt.svg", QColor("#22c55e"), size=16)
+        if not icon.isNull():
+            update_action.setIcon(icon)
         update_action.triggered.connect(self.update_selected_clients)
         # Блокируем кнопку обновления, если выбраны клиенты с разными ОС
         if not is_homogeneous_os:
@@ -701,12 +1738,21 @@ class ServerGUI(QMainWindow):
         menu.addSeparator()
 
         reboot_action = menu.addAction("Перезагрузить")
+        icon = load_icon_from_assets("restart_alt.svg", QColor("#f59e0b"), size=16)
+        if not icon.isNull():
+            reboot_action.setIcon(icon)
         reboot_action.triggered.connect(self.reboot_client)
 
         shutdown_action = menu.addAction("Выключить")
+        icon = load_icon_from_assets("power_settings_new.svg", QColor("#ef4444"), size=16)
+        if not icon.isNull():
+            shutdown_action.setIcon(icon)
         shutdown_action.triggered.connect(self.shutdown_client)
 
         disconnect_action = menu.addAction("Отключить")
+        icon = load_icon_from_assets("link_off.svg", QColor("#64748b"), size=16)
+        if not icon.isNull():
+            disconnect_action.setIcon(icon)
         disconnect_action.triggered.connect(self.disconnect_client)
 
         if not all_connected:
@@ -1093,7 +2139,7 @@ class ServerGUI(QMainWindow):
             }
             self._log_client_action(client_id, f"[Загрузка] Началось скачивание файла '{filename}' ({filesize / 1024 / 1024:.2f} MB).", "")
         except Exception as e:
-            self._log_client_action(client_id, f"❌ Ошибка начала скачивания: {e}", f"Ошибка начала скачивания от {client_id}: {e}")
+            self._log_client_action(client_id, f"Ошибка начала скачивания: {e}", f"Ошибка начала скачивания от {client_id}: {e}")
             if 'progress_dialog' in locals():
                 progress_dialog.close()
 
@@ -1160,6 +2206,7 @@ class ServerGUI(QMainWindow):
         grid_item.setIcon(self.placeholder_icon)
         grid_item.setData(Qt.UserRole, client_id)
         grid_item.setTextAlignment(Qt.AlignHCenter | Qt.AlignBottom)
+        grid_item.setSizeHint(QSize(self.grid_card_size, int(self.grid_card_size * 1.2)))
         self.clients_grid.addItem(grid_item)
         self.grid_items[client_id] = grid_item
 
@@ -1190,19 +2237,19 @@ class ServerGUI(QMainWindow):
         path = context['path']
 
         if final_size != expected_size:
-            msg = f"❌ Ошибка: размер файла не совпадает! Ожидалось {expected_size}, получено {final_size}. Файл '{os.path.basename(path)}' может быть поврежден."
+            msg = f"Ошибка: размер файла не совпадает. Ожидалось {expected_size}, получено {final_size}. Файл '{os.path.basename(path)}' может быть поврежден."
             self._log_client_action(client_id, msg, "")
             if progress_dialog:
                 progress_dialog.close()
             QMessageBox.critical(self, "Ошибка скачивания", msg)
             self._remove_partial_file(path) # Удаляем поврежденный файл
         else:
-            msg = f"✅ Файл '{os.path.basename(path)}' успешно скачан."
+            msg = f"Файл '{os.path.basename(path)}' успешно скачан."
             self._log_client_action(client_id, msg, "")
             if progress_dialog:
                 progress_dialog.setValue(100)
                 progress_dialog.close()
-            QMessageBox.information(self, "Скачивание завершено", msg)
+            self.show_toast(msg, level="success")
 
         self.download_contexts.pop(context_key, None)
 
@@ -1274,12 +2321,14 @@ class ServerGUI(QMainWindow):
             grid_item.setFlags(grid_item.flags() & ~Qt.ItemIsEnabled)
             tree_item.setFlags(tree_item.flags() & ~Qt.ItemIsEnabled)
             # Обновляем текст и иконку в сетке
-            grid_item.setText(f"{hostname}\n(⚪ Отключен)")
+            grid_item.setText(f"{hostname}\n(Отключен)")
             grid_item.setIcon(QIcon())
         else:
-            status_text = "❓ Неизвестно"
+            status_text = "Неизвестно"
 
         tree_item.setText(8, status_text)
+        if self.clients_tree.isSortingEnabled():
+            self.clients_tree.sortItems(self.clients_tree.sortColumn(), self.clients_tree.header().sortIndicatorOrder())
 
     def get_selected_client_ids(self):
         """Получение списка client_id выбранных клиентов."""
@@ -1320,6 +2369,9 @@ class ServerGUI(QMainWindow):
             haystack = " ".join([item.text(), " ".join(tags) if tags else ""]).lower()
             item.setHidden(bool(query) and query not in haystack)
 
+        if self.view_stack.currentIndex() == 1:
+            self.request_grid_screenshots()
+
     def _append_log_line(self, line):
         self._log_lines.append(line)
         if self._log_filter_active():
@@ -1352,6 +2404,151 @@ class ServerGUI(QMainWindow):
             if self._log_line_matches(line):
                 self.log_text.append(line)
 
+    def on_grid_size_changed(self, value):
+        self.grid_card_size = value
+        if hasattr(self, "grid_size_label"):
+            self.grid_size_label.setText(f"{value}px")
+        self._apply_grid_layout()
+
+    def _save_grid_size_from_slider(self):
+        self.save_settings()
+
+    def _set_grid_scale_visible(self, visible):
+        self.grid_scale_label.setVisible(visible)
+        self.grid_size_slider.setVisible(visible)
+        self.grid_size_label.setVisible(visible)
+
+    def _toast_colors(self, level):
+        theme_key = self.theme
+        if theme_key == "dark":
+            theme_key = "midnight"
+
+        palettes = {
+            "light": {
+                "info": ("#1f2937", "#e0f2fe"),
+                "success": ("#14532d", "#dcfce7"),
+                "warning": ("#78350f", "#fef3c7"),
+                "error": ("#7f1d1d", "#fee2e2"),
+            },
+            "midnight": {
+                "info": ("#e2e8f0", "#1e293b"),
+                "success": ("#dcfce7", "#14532d"),
+                "warning": ("#fef3c7", "#78350f"),
+                "error": ("#fee2e2", "#7f1d1d"),
+            },
+            "sand": {
+                "info": ("#3f3a2f", "#f3e9dc"),
+                "success": ("#14532d", "#f0fdf4"),
+                "warning": ("#78350f", "#fef3c7"),
+                "error": ("#7f1d1d", "#fee2e2"),
+            },
+            "graphite": {
+                "info": ("#e5e5e5", "#1f1f1f"),
+                "success": ("#dcfce7", "#14532d"),
+                "warning": ("#fef3c7", "#78350f"),
+                "error": ("#fee2e2", "#7f1d1d"),
+            },
+        }
+        text, bg = palettes.get(theme_key, palettes["light"]).get(level, ("#1f2937", "#e0f2fe"))
+        return text, bg
+
+    def _toast_icon(self, level):
+        accent = self._theme_accent_color()
+        icon_map = {
+            "info": ("info.svg", accent),
+            "success": ("checklist.svg", QColor("#22c55e")),
+            "warning": ("help.svg", QColor("#f59e0b")),
+            "error": ("delete.svg", QColor("#ef4444")),
+        }
+        icon_name, color = icon_map.get(level, ("info.svg", accent))
+        return load_icon_from_assets(icon_name, color, size=16)
+
+    def show_toast(self, message, level="info", duration_ms=2500):
+        text, bg = self._toast_colors(level)
+        icon = self._toast_icon(level)
+        toast = Toast(self, message, bg, text, duration_ms=duration_ms, icon=icon if not icon.isNull() else None)
+        toast.show()
+        self._toasts.append(toast)
+        toast.destroyed.connect(lambda: self._on_toast_closed(toast))
+        self._position_toasts()
+
+    def _on_toast_closed(self, toast):
+        if toast in self._toasts:
+            self._toasts.remove(toast)
+            self._position_toasts()
+
+    def _position_toasts(self):
+        if not self._toasts:
+            return
+        margin = 16
+        gap = 10
+        base_rect = self.rect()
+        y = base_rect.bottom() - margin
+        for toast in reversed(self._toasts):
+            size = toast.sizeHint()
+            x = base_rect.right() - margin - size.width()
+            y -= size.height()
+            toast.move(x, y)
+            y -= gap
+
+    def _build_placeholder_icon(self, size):
+        width = max(1, size.width())
+        height = max(1, size.height())
+        pixmap = QPixmap(width, height)
+        pixmap.fill(Qt.transparent)
+
+        theme_key = self.theme
+        if theme_key == "dark":
+            theme_key = "midnight"
+
+        if theme_key in ("midnight", "graphite"):
+            bg_top = QColor("#111827") if theme_key == "midnight" else QColor("#1a1a1a")
+            bg_bottom = QColor("#0b1220") if theme_key == "midnight" else QColor("#111111")
+            border = QColor("#1f2937") if theme_key == "midnight" else QColor("#2a2a2a")
+            text_color = QColor("#cbd5f5") if theme_key == "midnight" else QColor("#cfcfcf")
+        else:
+            bg_top = QColor("#f8fafc")
+            bg_bottom = QColor("#e5e7eb")
+            border = QColor("#cbd5f5")
+            text_color = QColor("#6b7280")
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        gradient = QLinearGradient(0, 0, 0, height)
+        gradient.setColorAt(0, bg_top)
+        gradient.setColorAt(1, bg_bottom)
+        painter.fillRect(0, 0, width, height, gradient)
+
+        radius = max(6, min(14, int(min(width, height) * 0.08)))
+        pen = QPen(border)
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.drawRoundedRect(2, 2, width - 4, height - 4, radius, radius)
+
+        font = QFont()
+        font.setPointSize(9)
+        font.setBold(False)
+        painter.setFont(font)
+        painter.setPen(text_color)
+        painter.drawText(0, int(height * 0.68), width, int(height * 0.25),
+                         Qt.AlignHCenter | Qt.AlignTop, "Нет изображения")
+        painter.end()
+        return QIcon(pixmap)
+
+    def _apply_grid_layout(self):
+        icon_w = max(120, self.grid_card_size - 20)
+        icon_h = int(icon_w * 0.75)
+        self.clients_grid.setIconSize(QSize(icon_w, icon_h))
+        text_area = 56
+        grid_size = QSize(self.grid_card_size, icon_h + text_area)
+        self.clients_grid.setGridSize(grid_size)
+        self.placeholder_icon = self._build_placeholder_icon(self.clients_grid.iconSize())
+        for item in self.grid_items.values():
+            item.setSizeHint(grid_size)
+            if item.icon().isNull():
+                item.setIcon(self.placeholder_icon)
+
     def _update_history(self, client_id, data):
         history = self.metrics_history[client_id]
         cpu = data.get("cpu_percent")
@@ -1370,18 +2567,18 @@ class ServerGUI(QMainWindow):
     def add_scheduled_task(self):
         command = self.task_command_input.text().strip()
         if not command:
-            QMessageBox.warning(self, "Предупреждение", "Введите команду для выполнения.")
+            self.show_toast("Введите команду для выполнения.", level="warning")
             return
 
         selected_ids = self.get_selected_client_ids()
         if not selected_ids:
-            QMessageBox.warning(self, "Предупреждение", "Выберите одного или нескольких клиентов.")
+            self.show_toast("Выберите одного или нескольких клиентов.", level="warning")
             return
 
         try:
             delay = int(self.task_delay_input.text().strip())
         except ValueError:
-            QMessageBox.warning(self, "Предупреждение", "Задержка должна быть числом (сек).")
+            self.show_toast("Задержка должна быть числом (сек).", level="warning")
             return
 
         delay = max(1, delay)
@@ -1452,7 +2649,7 @@ class ServerGUI(QMainWindow):
     def disconnect_client(self):
         selected_ids = self.get_selected_client_ids()
         if not selected_ids:
-            QMessageBox.warning(self, "Предупреждение", "Пожалуйста, выберите клиента(ов) для отключения.")
+            self.show_toast("Пожалуйста, выберите клиента(ов) для отключения.", level="warning")
             return
 
         for client_id in selected_ids:
@@ -1461,7 +2658,7 @@ class ServerGUI(QMainWindow):
                 self.ws_server.client_disconnect(client_id),
                 self.ws_server.loop
             )
-        QMessageBox.information(self, "✅ Отключено", f"Команда на отключение отправлена {len(selected_ids)} клиентам.")
+        self.show_toast(f"Команда на отключение отправлена {len(selected_ids)} клиентам.", level="info")
 
     def open_client_tab_from_double_click(self, item, column=None):
         self.open_client_tab(item)
@@ -1469,7 +2666,7 @@ class ServerGUI(QMainWindow):
     def open_client_tab_from_button(self):
         selected_items = self.clients_tree.selectedItems()
         if not selected_items:
-            QMessageBox.warning(self, "Предупреждение", "Пожалуйста, выберите клиента для открытия вкладки.")
+            self.show_toast("Пожалуйста, выберите клиента для открытия вкладки.", level="warning")
             return
         self.open_client_tab(selected_items[0])
 
@@ -1488,7 +2685,7 @@ class ServerGUI(QMainWindow):
 
         if self.client_data[client_id].get('status') != 'Connected':
             logging.warning(f"Попытка открыть вкладку для отключенного клиента: {client_id}")
-            QMessageBox.warning(self, "Ошибка", "Клиент не подключен.")
+            self.show_toast("Клиент не подключен.", level="error")
             return
             
         if client_id in self.client_tabs:
@@ -1549,6 +2746,22 @@ class ServerGUI(QMainWindow):
         index = self.tabs.insertTab(insert_pos, self.log_view_tab, "Системный лог")
         self.tabs.setCurrentIndex(index)
 
+    def show_tasks_tab(self):
+        """Показывает вкладку 'Задачи', если она закрыта."""
+        for i in range(self.tabs.count()):
+            if self.tabs.widget(i) == self.tasks_tab:
+                self.tabs.setCurrentIndex(i)
+                return
+
+        insert_pos = self.tabs.count()
+        for i in range(self.tabs.count()):
+            if self.tabs.widget(i) == self.clients_list_tab:
+                insert_pos = i + 1
+                break
+
+        index = self.tabs.insertTab(insert_pos, self.tasks_tab, "Задачи")
+        self.tabs.setCurrentIndex(index)
+
     def close_tab(self, index):
         """Закрытие вкладки."""
         widget = self.tabs.widget(index)
@@ -1582,7 +2795,7 @@ class ServerGUI(QMainWindow):
         """Отправка сообщения выбранным клиентам."""
         selected_ids = self.get_selected_client_ids()
         if not selected_ids:
-            QMessageBox.warning(self, "Предупреждение", "Пожалуйста, выберите одного или нескольких клиентов.")
+            self.show_toast("Пожалуйста, выберите одного или нескольких клиентов.", level="warning")
             return
 
         message, ok = QInputDialog.getMultiLineText(self, "Отправить сообщение", "Введите сообщение для выбранных клиентов:")
@@ -1596,15 +2809,15 @@ class ServerGUI(QMainWindow):
                 self.ws_server.loop
             )
         
-        QMessageBox.information(self, "✅ Отправлено", f"Команда отправки сообщения была передана {len(selected_ids)} клиентам.")
+        self.show_toast(f"Команда отправки сообщения была передана {len(selected_ids)} клиентам.", level="info")
 
     def update_selected_clients(self):
         selected_ids = self.get_selected_client_ids()
         if not selected_ids:
-            QMessageBox.warning(self, "Предупреждение", "Пожалуйста, выберите одного или нескольких клиентов для обновления.")
+            self.show_toast("Пожалуйста, выберите одного или нескольких клиентов для обновления.", level="warning")
             return
 
-        title = "⬆️ Выберите .deb пакет для обновления"
+        title = "Выберите .deb пакет для обновления"
         file_filter = "DEB Packages (*.deb)"
 
         package_path, _ = QFileDialog.getOpenFileName(self, title, "", file_filter)
@@ -1630,7 +2843,7 @@ class ServerGUI(QMainWindow):
         """Асинхронный процесс обновления клиента."""
         filename = os.path.basename(deb_path)
         remote_path = f"/tmp/{filename}"
-        self._log_client_action(client_id, f"⬆️ Начало обновления. Загрузка пакета '{filename}'...", "")
+        self._log_client_action(client_id, f"Начало обновления. Загрузка пакета '{filename}'...", "")
         try:
             file_size = os.path.getsize(deb_path)
             await self.ws_server.send_command(client_id, f"upload_file_start:{remote_path}:{file_size}")
@@ -1644,11 +2857,11 @@ class ServerGUI(QMainWindow):
                     await self.ws_server.send_command(client_id, f"upload_file_chunk:{chunk_b64}")
             
             await self.ws_server.send_command(client_id, f"upload_file_end:{hasher.hexdigest()}")
-            self._log_client_action(client_id, f"✅ Пакет '{filename}' успешно загружен в {remote_path}.", "")
+            self._log_client_action(client_id, f"Пакет '{filename}' успешно загружен в {remote_path}.", "")
             self._log_client_action(client_id, "Запуск установки пакета. Клиент будет перезапущен.", "")
             await self.ws_server.send_command(client_id, f"install_package:{remote_path}")
         except Exception as e:
-            self._log_client_action(client_id, f"❌ Ошибка в процессе обновления: {e}", "")
+            self._log_client_action(client_id, f"Ошибка в процессе обновления: {e}", "")
 
     def refresh_client_data(self):
         self.send_command_to_selected("refresh", "обновления")
@@ -1663,7 +2876,7 @@ class ServerGUI(QMainWindow):
         """Обобщенная функция для отправки команд выбранным клиентам."""
         selected_ids = self.get_selected_client_ids()
         if not selected_ids:
-            QMessageBox.warning(self, "Предупреждение", f"Пожалуйста, выберите клиента(ов) для {command_name_rus}.")
+            self.show_toast(f"Пожалуйста, выберите клиента(ов) для {command_name_rus}.", level="warning")
             return
 
         if needs_confirmation:
@@ -1687,10 +2900,12 @@ class ServerGUI(QMainWindow):
         if index == 0: # Список
             self.list_view_btn.setChecked(True)
             self.grid_view_btn.setChecked(False)
+            self._set_grid_scale_visible(False)
             self.grid_refresh_timer.stop()
         elif index == 1: # Сетка
             self.list_view_btn.setChecked(False)
             self.grid_view_btn.setChecked(True)
+            self._set_grid_scale_visible(True)
             self.request_grid_screenshots() # Немедленное обновление
             self.grid_refresh_timer.start(self.grid_refresh_interval * 1000)
 
@@ -1700,10 +2915,14 @@ class ServerGUI(QMainWindow):
             return # Не запрашивать, если сетка не активна
 
         logging.info("Запрос скриншотов для вида 'Сетка'...")
-        for client_id, data in self.client_data.items():
-            if data.get('status') == 'Connected':
+        for i in range(self.clients_grid.count()):
+            item = self.clients_grid.item(i)
+            if item.isHidden():
+                continue
+            client_id = item.data(Qt.UserRole)
+            if self.client_data.get(client_id, {}).get('status') == 'Connected':
                 asyncio.run_coroutine_threadsafe(
-                    self.ws_server.send_command(client_id, f"screenshot_quality:{self.quality_grid}"), # Запрашиваем низкое качество для превью
+                    self.ws_server.send_command(client_id, f"screenshot_quality:{self.quality_grid}"),
                     self.ws_server.loop
                 )
 
@@ -1718,3 +2937,7 @@ class ServerGUI(QMainWindow):
                 QSystemTrayIcon.Information,
                 2000
             )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_toasts()

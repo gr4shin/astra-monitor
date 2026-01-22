@@ -10,7 +10,7 @@ import sys
 import hashlib
 from datetime import datetime
 
-from astra_monitor_client.utils.system_utils import get_full_system_info, get_active_graphical_session, build_dbus_env
+from astra_monitor_client.utils.system_utils import get_full_system_info, get_active_graphical_session, get_active_graphical_sessions, build_dbus_env
 from astra_monitor_client.handlers.interactive_shell import InteractiveShell
 from astra_monitor_client.handlers.screenshot import ScreenshotHandler
 
@@ -56,6 +56,10 @@ class CommandHandler:
                     delay = max(1, min(60, int(new_settings["refresh_delay"])))
                     new_settings["refresh_delay"] = delay
                     
+                if "monitor_mode" in new_settings:
+                    if new_settings["monitor_mode"] not in ("all", "primary"):
+                        new_settings["monitor_mode"] = "all"
+
                 self.client.screenshot_settings.update(new_settings)
                 self.client.settings["screenshot"] = self.client.screenshot_settings
                 self.client.save_config()
@@ -531,18 +535,29 @@ rm -- \"$0\"
         try:
             settings.pop("client_id", None)
             self.client.settings.update(settings)
-            
+
             if 'monitoring_interval' in settings:
                 self.client.REFRESH_INTERVAL = settings['monitoring_interval']
 
-            if "quality" in self.client.settings["screenshot"]:
-                quality = max(1, min(100, int(self.client.settings["screenshot"]["quality"])))
-                self.client.settings["screenshot"]["quality"] = quality
-                
-            if "refresh_delay" in self.client.settings["screenshot"]:
-                delay = max(1, min(60, int(self.client.settings["screenshot"]["refresh_delay"])))
-                self.client.settings["screenshot"]["refresh_delay"] = delay
-                    
+            if "screenshot" in settings:
+                if not isinstance(settings["screenshot"], dict):
+                    settings["screenshot"] = {}
+                self.client.screenshot_settings.update(settings["screenshot"])
+                self.client.settings["screenshot"] = self.client.screenshot_settings
+
+            screenshot_settings = self.client.settings.get("screenshot", {})
+            if "quality" in screenshot_settings:
+                quality = max(1, min(100, int(screenshot_settings["quality"])))
+                screenshot_settings["quality"] = quality
+
+            if "refresh_delay" in screenshot_settings:
+                delay = max(1, min(60, int(screenshot_settings["refresh_delay"])))
+                screenshot_settings["refresh_delay"] = delay
+
+            if "monitor_mode" in screenshot_settings:
+                if screenshot_settings["monitor_mode"] not in ("all", "primary"):
+                    screenshot_settings["monitor_mode"] = "all"
+
             self.client.save_config()
             logging.info("✅ Новые настройки применены и сохранены: %s", self.client.settings)
             return {"settings_applied": "success", "new_settings": self.client.settings}
@@ -575,9 +590,9 @@ rm -- \"$0\"
             except Exception:
                 pass
 
-            user, display, uid = get_active_graphical_session()
-            if not (user and display and uid):
-                return {"error": "❌ Не найдено активной графической сессии"}
+            sessions = get_active_graphical_sessions()
+            if not sessions:
+                return {"error": "❌ Не найдено активных графических сессий"}
 
             notify_cmd = [
                 'notify-send',
@@ -587,25 +602,35 @@ rm -- \"$0\"
                 'Сообщение от администратора',
                 message
             ]
-            result = run_as_user(user, display, uid, notify_cmd, timeout=10, capture_output=True)
-            if result and result.returncode == 0:
-                return {"message_result": "success", "info": f"✅ Сообщение отправлено пользователю {user}"}
-
-            if shutil.which('zenity'):
-                short_msg = message[:200] + "..." if len(message) > 200 else message
-                zenity_cmd = [
-                    'zenity',
-                    '--info',
-                    '--title=Сообщение от администратора',
-                    '--text=' + short_msg,
-                    '--width=400',
-                    '--timeout=10'
-                ]
-                result = run_as_user(user, display, uid, zenity_cmd, timeout=15, capture_output=True)
+            failed = 0
+            delivered = 0
+            for user, display, uid in sessions:
+                result = run_as_user(user, display, uid, notify_cmd, timeout=10, capture_output=True)
                 if result and result.returncode == 0:
-                    return {"message_result": "success", "info": f"✅ Сообщение отправлено пользователю {user} через zenity"}
+                    delivered += 1
+                    continue
 
-            return {"message_result": "error", "error": f"❌ Не удалось отправить уведомление пользователю {user}."}
+                if shutil.which('zenity'):
+                    short_msg = message[:200] + "..." if len(message) > 200 else message
+                    zenity_cmd = [
+                        'zenity',
+                        '--info',
+                        '--title=Сообщение от администратора',
+                        '--text=' + short_msg,
+                        '--width=400',
+                        '--timeout=10'
+                    ]
+                    result = run_as_user(user, display, uid, zenity_cmd, timeout=15, capture_output=True)
+                    if result and result.returncode == 0:
+                        delivered += 1
+                        continue
+
+                failed += 1
+
+            if failed:
+                return {"message_result": "error", "error": f"❌ Не удалось отправить уведомление для {failed} сессий."}
+
+            return {"message_result": "success", "info": f"✅ Сообщение отправлено в {delivered} сессий."}
         except Exception as e:
             logging.error("Критическая ошибка отправки сообщения: %s", e)
             return {"message_result": "error", "error": f"❌ Критическая ошибка: {str(e)}"}

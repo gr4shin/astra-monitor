@@ -7,8 +7,10 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QComb
                              QLabel, QPushButton, QTextEdit, QMessageBox, QTableWidget, 
                              QHeaderView, QAbstractItemView, QTableWidgetItem, QCheckBox,
                              QFileDialog)
-from PyQt5.QtGui import QFont
-from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QFont, QColor
+from PyQt5.QtCore import Qt, QSize
+
+from ..icon_utils import load_icon_from_assets
 
 class UpdateManagerWidget(QWidget):
 
@@ -89,6 +91,23 @@ class UpdateManagerWidget(QWidget):
         main_layout.addWidget(pkg_group)
         
         main_layout.setStretch(1, 1) # pkg_group
+        self._apply_icons()
+
+    def _apply_icons(self):
+        icon_map = {
+            self.load_repos_btn: ("download.svg", QColor("#2563eb")),
+            self.save_repo_btn: ("save.svg", QColor("#22c55e")),
+            self.check_updates_btn: ("refresh.svg", QColor("#0ea5e9")),
+            self.list_upgradable_btn: ("search.svg", QColor("#64748b")),
+            self.install_selected_btn: ("system_update_alt.svg", QColor("#22c55e")),
+            self.install_all_btn: ("system_update_alt.svg", QColor("#16a34a")),
+            self.clear_output_btn: ("clear_all.svg", QColor("#64748b")),
+        }
+        for button, (icon_name, color) in icon_map.items():
+            icon = load_icon_from_assets(icon_name, color=color, size=18)
+            if not icon.isNull():
+                button.setIcon(icon)
+                button.setIconSize(QSize(18, 18))
 
     def load_repositories(self):
         asyncio.run_coroutine_threadsafe(
@@ -99,7 +118,11 @@ class UpdateManagerWidget(QWidget):
     def save_repository(self):
         current_file = self.repo_selector.currentText()
         if not current_file:
-            QMessageBox.warning(self, "Ошибка", "Не выбран файл репозитория.")
+            main_window = self.parent() if hasattr(self, "parent") else None
+            if hasattr(main_window, "show_toast"):
+                main_window.show_toast("Не выбран файл репозитория.", level="warning")
+            else:
+                QMessageBox.warning(self, "Ошибка", "Не выбран файл репозитория.")
             return
         
         content = self.repo_content_edit.toPlainText()
@@ -134,7 +157,11 @@ class UpdateManagerWidget(QWidget):
                 selected_packages.append(package_item.text())
         
         if not selected_packages:
-            QMessageBox.warning(self, "Нет выбора", "Выберите пакеты для обновления.")
+            main_window = self.parent() if hasattr(self, "parent") else None
+            if hasattr(main_window, "show_toast"):
+                main_window.show_toast("Выберите пакеты для обновления.", level="warning")
+            else:
+                QMessageBox.warning(self, "Нет выбора", "Выберите пакеты для обновления.")
             return
 
         asyncio.run_coroutine_threadsafe(

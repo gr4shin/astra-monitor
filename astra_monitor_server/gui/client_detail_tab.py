@@ -5,9 +5,9 @@ import asyncio
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QListWidget,
     QStackedWidget, QPushButton, QSplitter, QTextEdit,
-    QLineEdit, QLabel, QMessageBox, QSpinBox, QCheckBox, QFormLayout)
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
-from PyQt5.QtGui import QFont, QIntValidator, QFontMetrics
+    QLineEdit, QLabel, QMessageBox, QSpinBox, QCheckBox, QFormLayout, QComboBox)
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSize
+from PyQt5.QtGui import QFont, QIntValidator, QFontMetrics, QColor
 
 # Импортируем локальные модули
 from .dialogs.custom_command_dialog import CustomCommandDialog
@@ -18,6 +18,7 @@ from .widgets.update_manager_widget import UpdateManagerWidget
 from .widgets.screenshot_widget import ScreenshotWidget
 from .widgets.metrics_history_widget import MetricsHistoryWidget
 from .terminal_emulator import TerminalEmulator
+from .icon_utils import load_icon_from_assets
 
 
 class TerminalView(QTextEdit):
@@ -76,8 +77,10 @@ class ClientDetailTab(QWidget):
         
         menu_group = QGroupBox("Меню")
         menu_layout = QVBoxLayout(menu_group)
+        menu_group.setMinimumWidth(220)
         
         self.menu_list = QListWidget()
+        self.menu_list.setMinimumWidth(200)
         self.content_stack = QStackedWidget()
 
         # Create a map of menu item names to their corresponding widgets and visibility
@@ -95,7 +98,22 @@ class ClientDetailTab(QWidget):
         self.visible_menu_items = []
         for name, (widget, is_visible) in self.menu_map.items():
             if is_visible:
-                self.menu_list.addItem(name)
+                item = self.menu_list.addItem(name)
+                list_item = self.menu_list.item(self.menu_list.count() - 1)
+                icon_name = {
+                    "Информация о системе": "info.svg",
+                    "Файловый менеджер": "folder.svg",
+                    "Команды": "terminal.svg",
+                    "Управление обновлениями": "system_update_alt.svg",
+                    "Экран клиента": "photo_camera.svg",
+                    "История метрик": "speed.svg",
+                    "Журнал клиента": "info.svg",
+                    "Настройки": "settings.svg",
+                }.get(name)
+                if icon_name:
+                    icon = load_icon_from_assets(icon_name, QColor("#64748b"), size=18)
+                    if not icon.isNull():
+                        list_item.setIcon(icon)
                 self.content_stack.addWidget(widget)
                 self.visible_menu_items.append(name)
 
@@ -112,6 +130,7 @@ class ClientDetailTab(QWidget):
         self.menu_list.currentRowChanged.connect(self.change_content)
         menu_layout.addWidget(self.menu_list)
         left_layout.addWidget(menu_group)
+        left_widget.setMinimumWidth(220)
         
         layout.addWidget(left_widget, 1)
         layout.addWidget(self.content_stack, 3)
@@ -165,6 +184,8 @@ class ClientDetailTab(QWidget):
         remove_btn = QPushButton("Удалить")
         remove_btn.setToolTip("Удалить выбранную команду")
         remove_btn.clicked.connect(self.remove_custom_command)
+
+        self._apply_command_icons(exec_btn, add_btn, edit_btn, remove_btn)
         
         custom_buttons_layout.addWidget(exec_btn)
         custom_buttons_layout.addWidget(add_btn)
@@ -233,6 +254,12 @@ class ClientDetailTab(QWidget):
         self.screenshot_auto.setChecked(self.client_settings.get('screenshot', {}).get('enabled', True))
         screenshot_layout.addRow(self.screenshot_auto)
 
+        self.screenshot_mode = QComboBox()
+        self.screenshot_mode.addItems(["Все мониторы", "Основной монитор"])
+        monitor_mode = self.client_settings.get('screenshot', {}).get('monitor_mode', 'all')
+        self.screenshot_mode.setCurrentIndex(0 if monitor_mode == 'all' else 1)
+        screenshot_layout.addRow("Режим скриншота:", self.screenshot_mode)
+
         # Группа настроек мониторинга
         monitoring_group = QGroupBox("Настройки мониторинга")
         monitoring_layout = QFormLayout(monitoring_group)
@@ -286,6 +313,8 @@ class ClientDetailTab(QWidget):
         reset_settings_btn = QPushButton("Сбросить настройки")
         reset_settings_btn.clicked.connect(self.reset_settings)
 
+        self._apply_settings_icons(save_settings_btn, reset_settings_btn)
+
         settings_buttons_layout.addWidget(save_settings_btn)
         settings_buttons_layout.addWidget(reset_settings_btn)
 
@@ -298,13 +327,37 @@ class ClientDetailTab(QWidget):
         settings_layout.addStretch()
         return settings_widget
 
+    def _apply_command_icons(self, exec_btn, add_btn, edit_btn, remove_btn):
+        icon_map = {
+            exec_btn: ("play_arrow.svg", QColor("#22c55e")),
+            add_btn: ("content_copy.svg", QColor("#0ea5e9")),
+            edit_btn: ("edit.svg", QColor("#f59e0b")),
+            remove_btn: ("delete.svg", QColor("#ef4444"))
+        }
+        for button, (icon_name, color) in icon_map.items():
+            icon = load_icon_from_assets(icon_name, color=color, size=18)
+            if not icon.isNull():
+                button.setIcon(icon)
+                button.setIconSize(QSize(18, 18))
+
+    def _apply_settings_icons(self, save_btn, reset_btn):
+        icon_map = {
+            save_btn: ("save.svg", QColor("#22c55e")),
+            reset_btn: ("refresh.svg", QColor("#64748b"))
+        }
+        for button, (icon_name, color) in icon_map.items():
+            icon = load_icon_from_assets(icon_name, color=color, size=18)
+            if not icon.isNull():
+                button.setIcon(icon)
+                button.setIconSize(QSize(18, 18))
+
     def get_full_system_info(self):
         """Запрос полной информации о системе"""
         future = asyncio.run_coroutine_threadsafe(
             self.ws_server.send_command(self.client_id, "get_full_system_info"), 
             self.ws_server.loop
         )
-        self.log_message_requested.emit("ℹ️ Запрос полной информации о системе...")
+        self.log_message_requested.emit("Запрос полной информации о системе...")
     
     def change_content(self, index):
         """Изменение отображаемого контента"""
@@ -490,7 +543,7 @@ class ClientDetailTab(QWidget):
         
         client_name = self.client_data.get('hostname', self.client_id)
         log_name = name if name else command
-        self.log_message_requested.emit(f"▶️ Выполнение команды на {client_name}: {log_name}")
+        self.log_message_requested.emit(f"Выполнение команды на {client_name}: {log_name}")
     
     def execute_selected_custom_command(self):
         """Выполнение выбранной кастомной команды"""
@@ -548,19 +601,25 @@ class ClientDetailTab(QWidget):
             
             if name and command:
                 if name in self.custom_commands:
-                    QMessageBox.warning(self, "⚠️ Внимание", f"Команда с именем '{name}' уже существует.")
+                    if self.main_window:
+                        self.main_window.show_toast(f"Команда с именем '{name}' уже существует.", level="warning")
+                    else:
+                        QMessageBox.warning(self, "Внимание", f"Команда с именем '{name}' уже существует.")
                     return
                 
                 self.custom_commands[name] = command
                 self.custom_commands_list.addItem(name)
-                self.log_message_requested.emit(f"✅ Добавлена новая команда: {name}")
+                self.log_message_requested.emit(f"Добавлена новая команда: {name}")
                 self.custom_commands_updated.emit()
 
     def edit_custom_command(self):
         """Редактирование выбранной кастомной команды"""
         current_item = self.custom_commands_list.currentItem()
         if not current_item:
-            QMessageBox.warning(self, "⚠️ Внимание", "Пожалуйста, выберите команду для редактирования.")
+            if self.main_window:
+                self.main_window.show_toast("Пожалуйста, выберите команду для редактирования.", level="warning")
+            else:
+                QMessageBox.warning(self, "Внимание", "Пожалуйста, выберите команду для редактирования.")
             return
 
         old_name = current_item.text()
@@ -574,20 +633,26 @@ class ClientDetailTab(QWidget):
             new_command = new_data['command']
 
             if not new_name or not new_command:
-                QMessageBox.warning(self, "⚠️ Внимание", "Название и команда не могут быть пустыми.")
+                if self.main_window:
+                    self.main_window.show_toast("Название и команда не могут быть пустыми.", level="warning")
+                else:
+                    QMessageBox.warning(self, "Внимание", "Название и команда не могут быть пустыми.")
                 return
 
             if old_name == new_name:
                 self.custom_commands[old_name] = new_command
-                self.log_message_requested.emit(f"✏️ Команда '{old_name}' обновлена.")
+                self.log_message_requested.emit(f"Команда '{old_name}' обновлена.")
             else:
                 if new_name in self.custom_commands:
-                    QMessageBox.warning(self, "⚠️ Внимание", f"Команда с именем '{new_name}' уже существует.")
+                    if self.main_window:
+                        self.main_window.show_toast(f"Команда с именем '{new_name}' уже существует.", level="warning")
+                    else:
+                        QMessageBox.warning(self, "Внимание", f"Команда с именем '{new_name}' уже существует.")
                     return
                 del self.custom_commands[old_name]
                 self.custom_commands[new_name] = new_command
                 current_item.setText(new_name)
-                self.log_message_requested.emit(f"✏️ Команда '{old_name}' переименована в '{new_name}'.")
+                self.log_message_requested.emit(f"Команда '{old_name}' переименована в '{new_name}'.")
             
             self.custom_commands_updated.emit()
 
@@ -598,7 +663,7 @@ class ClientDetailTab(QWidget):
             command_name = current_item.text()
             reply = QMessageBox.question(
                 self, 
-                "❓ Подтверждение", 
+                "Подтверждение", 
                 f"Вы уверены, что хотите удалить команду '{command_name}'?",
                 QMessageBox.Yes | QMessageBox.No
             )
@@ -623,7 +688,8 @@ class ClientDetailTab(QWidget):
                 'screenshot': {
                     'quality': self.screenshot_quality.value(),
                     'refresh_delay': self.screenshot_delay.value(),
-                    'enabled': self.screenshot_auto.isChecked()
+                    'enabled': self.screenshot_auto.isChecked(),
+                    'monitor_mode': 'all' if self.screenshot_mode.currentIndex() == 0 else 'primary'
                 }
             }
             
@@ -637,16 +703,22 @@ class ClientDetailTab(QWidget):
             self.meta_changed.emit({"tags": tags})
             client_name = self.client_data.get('hostname', self.client_id)
             self.log_message_requested.emit(f"Настройки отправлены клиенту {client_name}. Полностью применяться после переподключения клиента.")
-            QMessageBox.information(self, "✅ Успех", "Настройки успешно отправлены клиенту! Полностью применяться после переподключения клиента.")
+            if self.main_window:
+                self.main_window.show_toast("Настройки отправлены клиенту. Полностью применятся после переподключения.", level="success")
+            else:
+                QMessageBox.information(self, "Успех", "Настройки успешно отправлены клиенту! Полностью применяться после переподключения клиента.")
             
         except ValueError:
-            QMessageBox.warning(self, "⚠️ Ошибка", "Проверьте правильность введенных значений")
+            if self.main_window:
+                self.main_window.show_toast("Проверьте правильность введенных значений", level="error")
+            else:
+                QMessageBox.warning(self, "Ошибка", "Проверьте правильность введенных значений")
     
     def reset_settings(self):
         """Сброс настроек к значениям по умолчанию"""
         reply = QMessageBox.question(
             self, 
-            "❓ Подтверждение", 
+            "Подтверждение", 
             "Вы уверены, что хотите сбросить настройки к значениям по умолчанию?",
             QMessageBox.Yes | QMessageBox.No
         )
@@ -662,5 +734,6 @@ class ClientDetailTab(QWidget):
             self.screenshot_quality.setValue(85)
             self.screenshot_delay.setValue(5)
             self.screenshot_auto.setChecked(True)
+            self.screenshot_mode.setCurrentIndex(0)
             client_name = self.client_data.get('hostname', self.client_id)
             self.log_message_requested.emit(f"[Сброс] Настройки клиента {client_name}")

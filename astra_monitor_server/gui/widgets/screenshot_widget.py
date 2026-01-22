@@ -2,10 +2,13 @@
 
 import base64
 import asyncio
+import json
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, 
-                             QPushButton, QLabel, QScrollArea, QFileDialog)
-from PyQt5.QtCore import Qt, QTimer, QDateTime
-from PyQt5.QtGui import QImage, QPixmap
+                             QPushButton, QLabel, QScrollArea, QFileDialog, QComboBox)
+from PyQt5.QtCore import Qt, QTimer, QDateTime, QSize
+from PyQt5.QtGui import QImage, QPixmap, QColor
+
+from ..icon_utils import load_icon_from_assets
 
 class ScreenshotWidget(QWidget):
     def __init__(self, parent=None, ws_server=None, client_id=None, log_callback=None, settings_screenshot={}):
@@ -35,7 +38,15 @@ class ScreenshotWidget(QWidget):
         self.auto_refresh_btn.setCheckable(True)
         self.auto_refresh_btn.clicked.connect(self.toggle_auto_refresh)
         control_layout.addWidget(self.auto_refresh_btn)
-        
+
+        self.monitor_mode_combo = QComboBox()
+        self.monitor_mode_combo.addItems(["Все мониторы", "Основной монитор"])
+        mode = self.settings_screenshot.get("monitor_mode", "all")
+        self.monitor_mode_combo.setCurrentIndex(0 if mode == "all" else 1)
+        self.monitor_mode_combo.currentIndexChanged.connect(self.update_monitor_mode)
+        control_layout.addWidget(QLabel("Режим:"))
+        control_layout.addWidget(self.monitor_mode_combo)
+
         control_layout.addStretch()
         
         # Область отображения скриншота
@@ -70,6 +81,8 @@ class ScreenshotWidget(QWidget):
         
         layout.addWidget(control_group)
         layout.addWidget(image_group)
+
+        self._apply_icons()
         
     def take_screenshot(self):
         """Запрос скриншота с определенным качеством"""
@@ -90,6 +103,15 @@ class ScreenshotWidget(QWidget):
         else:
             self.auto_refresh_timer.stop()
             self.log_callback("Автообновление выключено")
+
+    def update_monitor_mode(self):
+        mode = "all" if self.monitor_mode_combo.currentIndex() == 0 else "primary"
+        self.settings_screenshot["monitor_mode"] = mode
+        self.log_callback(f"Режим скриншота: {self.monitor_mode_combo.currentText()}")
+        asyncio.run_coroutine_threadsafe(
+            self.ws_server.send_command(self.client_id, f"screenshot_settings:{json.dumps({'monitor_mode': mode})}"),
+            self.ws_server.loop
+        )
     
     def update_screenshot(self, image_data, quality, timestamp):
         """Обновление отображаемого скриншота"""
@@ -102,7 +124,7 @@ class ScreenshotWidget(QWidget):
             image.loadFromData(img_data)
             
             if image.isNull():
-                self.log_callback("❌ Не удалось загрузить изображение")
+                self.log_callback("Не удалось загрузить изображение")
                 return
             
             # Масштабируем для отображения (сохраняем пропорции)
@@ -123,10 +145,10 @@ class ScreenshotWidget(QWidget):
             self.info_label.setText(f"Размер: {size_text} | Качество: {quality}% | Время: {time_text}")
             
             self.save_btn.setEnabled(True)
-            self.log_callback(f"✅ Скриншот получен ({size_text}, качество: {quality}%)")
+            self.log_callback(f"Скриншот получен ({size_text}, качество: {quality}%)")
             
         except Exception as e:
-            self.log_callback(f"❌ Ошибка обработки скриншота: {str(e)}")
+            self.log_callback(f"Ошибка обработки скриншота: {str(e)}")
     
     def save_screenshot(self):
         """Сохранение скриншота в файл"""
@@ -142,6 +164,18 @@ class ScreenshotWidget(QWidget):
         if file_path:
             try:
                 self.current_image.save(file_path)
-                self.log_callback(f"✅ Скриншот сохранен: {file_path}")
+                self.log_callback(f"Скриншот сохранен: {file_path}")
             except Exception as e:
-                self.log_callback(f"❌ Ошибка сохранения: {str(e)}")
+                self.log_callback(f"Ошибка сохранения: {str(e)}")
+
+    def _apply_icons(self):
+        icon_map = {
+            self.take_btn: ("photo_camera.svg", QColor("#2563eb")),
+            self.auto_refresh_btn: ("refresh.svg", QColor("#0ea5e9")),
+            self.save_btn: ("save.svg", QColor("#22c55e")),
+        }
+        for button, (icon_name, color) in icon_map.items():
+            icon = load_icon_from_assets(icon_name, color=color, size=18)
+            if not icon.isNull():
+                button.setIcon(icon)
+                button.setIconSize(QSize(18, 18))

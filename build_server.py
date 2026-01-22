@@ -36,6 +36,7 @@ def build_standalone(build_config=None):
         "--hidden-import=PyQt5.QtWidgets",
         "--hidden-import=PyQt5.QtGui",
         "--hidden-import=PyQt5.QtCore",
+        "--hidden-import=PyQt5.QtSvg",
         "--hidden-import=websockets",
         "--hidden-import=pkg_resources.py2_warn",
         "--clean",
@@ -53,6 +54,9 @@ def build_standalone(build_config=None):
     
     temp_assets_dir = "build_server_assets"
     try:
+        if os.path.isdir("assets/icons"):
+            options.append("--add-data=assets/icons:assets/icons")
+            print("🖼️  Иконки из assets/icons будут включены в сборку.")
         if build_config:
             os.makedirs(temp_assets_dir, exist_ok=True)
             config_file_path = os.path.join(temp_assets_dir, "server_config.json")

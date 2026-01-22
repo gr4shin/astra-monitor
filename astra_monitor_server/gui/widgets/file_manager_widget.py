@@ -9,7 +9,10 @@ import logging
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
                              QTreeWidget, QTreeWidgetItem, QMessageBox, QFileDialog, QInputDialog, QLineEdit,
                              QProgressDialog, QMenu)
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal, QSize
+from PyQt5.QtGui import QColor
+
+from ..icon_utils import load_icon_from_assets
 
 class FileManagerWidget(QWidget):
     # Сигналы для безопасного обновления GUI из другого потока
@@ -53,12 +56,20 @@ class FileManagerWidget(QWidget):
         path_layout.addWidget(self.refresh_button)
         path_layout.addWidget(QLabel("Путь:"))
         path_layout.addWidget(self.path_input, 1)
+
+        self._apply_icons()
         
         # Список файлов
         files_frame = QFrame()
         files_layout = QVBoxLayout(files_frame)
         search_layout = QHBoxLayout()
-        search_layout.addWidget(QLabel("Поиск:"))
+        search_icon = load_icon_from_assets("search.svg", QColor("#64748b"), size=16)
+        if not search_icon.isNull():
+            search_label = QLabel()
+            search_label.setPixmap(search_icon.pixmap(16, 16))
+            search_layout.addWidget(search_label)
+        else:
+            search_layout.addWidget(QLabel("Поиск:"))
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Имя файла или папки...")
         self.search_input.textChanged.connect(self.filter_files)
@@ -78,6 +89,9 @@ class FileManagerWidget(QWidget):
         layout.addLayout(path_layout)
         layout.addWidget(files_frame)
         
+        self.folder_icon = load_icon_from_assets("folder.svg", QColor("#f59e0b"), size=16)
+        self.file_icon = load_icon_from_assets("content_copy.svg", QColor("#64748b"), size=16)
+
         self.load_files()
         
     def load_files(self):
@@ -103,6 +117,8 @@ class FileManagerWidget(QWidget):
                     item = QTreeWidgetItem([name, "Папка", ""])
                     path = posixpath.join(self.current_path, name)
                     item.setData(0, Qt.UserRole, {"type": "directory", "path": path})
+                    if not self.folder_icon.isNull():
+                        item.setIcon(0, self.folder_icon)
                     self.files_list.addTopLevelItem(item)
             
             # Добавляем файлы
@@ -116,8 +132,24 @@ class FileManagerWidget(QWidget):
                         "path": path, 
                         "size": file_info['size']
                     })
+                    if not self.file_icon.isNull():
+                        item.setIcon(0, self.file_icon)
                     self.files_list.addTopLevelItem(item)
         self.filter_files()
+
+    def _apply_icons(self):
+        icon_map = {
+            self.back_button: ("arrow_back.svg", QColor("#64748b")),
+            self.forward_button: ("arrow_forward.svg", QColor("#64748b")),
+            self.home_button: ("home.svg", QColor("#0ea5e9")),
+            self.up_button: ("flip_to_front.svg", QColor("#64748b")),
+            self.refresh_button: ("refresh.svg", QColor("#2563eb")),
+        }
+        for button, (icon_name, color) in icon_map.items():
+            icon = load_icon_from_assets(icon_name, color=color, size=18)
+            if not icon.isNull():
+                button.setIcon(icon)
+                button.setIconSize(QSize(18, 18))
 
     def format_size(self, size_bytes):
         """Форматирование размера файла"""
@@ -191,15 +223,24 @@ class FileManagerWidget(QWidget):
         """Скачивание выбранного файла"""
         current_item = item or self.files_list.currentItem()
         if not current_item:
-            QMessageBox.warning(self, "Ошибка", "Выберите файл для скачивания")
+            if self.main_window:
+                self.main_window.show_toast("Выберите файл для скачивания", level="warning")
+            else:
+                QMessageBox.warning(self, "Ошибка", "Выберите файл для скачивания")
             return
             
         file_info = current_item.data(0, Qt.UserRole)
         if not file_info:
-            QMessageBox.warning(self, "Ошибка", "Не удалось получить информацию о файле.")
+            if self.main_window:
+                self.main_window.show_toast("Не удалось получить информацию о файле.", level="error")
+            else:
+                QMessageBox.warning(self, "Ошибка", "Не удалось получить информацию о файле.")
             return
         if file_info['type'] != 'file':
-            QMessageBox.warning(self, "Ошибка", "Можно скачивать только файлы")
+            if self.main_window:
+                self.main_window.show_toast("Можно скачивать только файлы", level="warning")
+            else:
+                QMessageBox.warning(self, "Ошибка", "Можно скачивать только файлы")
             return
 
         remote_path = file_info['path']
@@ -321,12 +362,18 @@ class FileManagerWidget(QWidget):
         """Переименование файла или папки"""
         current_item = item or self.files_list.currentItem()
         if not current_item:
-            QMessageBox.warning(self, "Ошибка", "Выберите файл или папку для переименования")
+            if self.main_window:
+                self.main_window.show_toast("Выберите файл или папку для переименования", level="warning")
+            else:
+                QMessageBox.warning(self, "Ошибка", "Выберите файл или папку для переименования")
             return
 
         file_info = current_item.data(0, Qt.UserRole)
         if not file_info:
-            QMessageBox.warning(self, "Ошибка", "Не удалось получить информацию о файле.")
+            if self.main_window:
+                self.main_window.show_toast("Не удалось получить информацию о файле.", level="error")
+            else:
+                QMessageBox.warning(self, "Ошибка", "Не удалось получить информацию о файле.")
             return
         old_name = os.path.basename(file_info['path'])
 
@@ -350,12 +397,18 @@ class FileManagerWidget(QWidget):
         """Удаление выбранного файла/папки"""
         current_item = item or self.files_list.currentItem()
         if not current_item:
-            QMessageBox.warning(self, "Ошибка", "Выберите файл или папку для удаления")
+            if self.main_window:
+                self.main_window.show_toast("Выберите файл или папку для удаления", level="warning")
+            else:
+                QMessageBox.warning(self, "Ошибка", "Выберите файл или папку для удаления")
             return
             
         file_info = current_item.data(0, Qt.UserRole)
         if not file_info:
-            QMessageBox.warning(self, "Ошибка", "Не удалось получить информацию о файле.")
+            if self.main_window:
+                self.main_window.show_toast("Не удалось получить информацию о файле.", level="error")
+            else:
+                QMessageBox.warning(self, "Ошибка", "Не удалось получить информацию о файле.")
             return
         name = os.path.basename(file_info['path'])
         
@@ -392,14 +445,32 @@ class FileManagerWidget(QWidget):
 
         # Actions that are always available
         refresh_action = menu.addAction("Обновить")
+        icon = load_icon_from_assets("refresh.svg", QColor("#2563eb"), size=16)
+        if not icon.isNull():
+            refresh_action.setIcon(icon)
         upload_action = menu.addAction("Загрузить")
+        icon = load_icon_from_assets("upload.svg", QColor("#0ea5e9"), size=16)
+        if not icon.isNull():
+            upload_action.setIcon(icon)
         new_folder_action = menu.addAction("Новая папка")
+        icon = load_icon_from_assets("folder.svg", QColor("#f59e0b"), size=16)
+        if not icon.isNull():
+            new_folder_action.setIcon(icon)
         menu.addSeparator()
 
         # Actions that depend on selection
         download_action = menu.addAction("Скачать")
+        icon = load_icon_from_assets("download.svg", QColor("#22c55e"), size=16)
+        if not icon.isNull():
+            download_action.setIcon(icon)
         rename_action = menu.addAction("Переименовать")
+        icon = load_icon_from_assets("edit.svg", QColor("#64748b"), size=16)
+        if not icon.isNull():
+            rename_action.setIcon(icon)
         delete_action = menu.addAction("Удалить")
+        icon = load_icon_from_assets("delete.svg", QColor("#ef4444"), size=16)
+        if not icon.isNull():
+            delete_action.setIcon(icon)
 
         if selected_item:
             file_info = selected_item.data(0, Qt.UserRole)

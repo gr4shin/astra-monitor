@@ -31,7 +31,8 @@ class SystemMonitorClient:
             "screenshot": {
                 "quality": 85,
                 "refresh_delay": 5,
-                "enabled": False
+                "enabled": False,
+                "monitor_mode": "all"
             },
             "client_id": None
         }
@@ -200,7 +201,7 @@ class SystemMonitorClient:
         logging.info("Запуск клиента: %s (%s)", self.hostname, self.local_ip)
         logging.info("Подключение к серверу: %s", server_uri)
 
-        reconnect_attempts = 0
+        reconnect_delay = self.reconnect_base_delay
         while self.is_running:
             last_screenshot_time = 0
             screenshot_task = None
@@ -232,7 +233,7 @@ class SystemMonitorClient:
                     async with self.send_lock:
                         await websocket.send(auth_data)
                     logging.info("✅ Аутентификация успешна")
-                    reconnect_attempts = 0
+                    reconnect_delay = self.reconnect_base_delay
                     
                     while self.is_running:
                         current_time = time.time()
@@ -274,29 +275,20 @@ class SystemMonitorClient:
                             break # Exit inner loop on connection close
                             
             except websockets.exceptions.ConnectionClosed:
-                reconnect_attempts += 1
-                delay = min(self.reconnect_max_delay, self.reconnect_base_delay * (2 ** (reconnect_attempts - 1)))
-                jitter = random.uniform(-self.reconnect_jitter, self.reconnect_jitter)
-                delay = max(1, delay * (1 + jitter))
-                logging.warning("🔌 Соединение разорвано, повторная попытка через %.1f секунд...", delay)
+                delay = max(1, int(reconnect_delay))
+                logging.warning("🔌 Соединение разорвано, повторная попытка через %d секунд...", delay)
                 logging.info("-> 🧹 Соединение разорвано, запускается очистка интерактивной сессии...")
                 await self.command_handler.cleanup_interactive_session()
                 await asyncio.sleep(delay)
             except ConnectionRefusedError:
-                reconnect_attempts += 1
-                delay = min(self.reconnect_max_delay, self.reconnect_base_delay * (2 ** (reconnect_attempts - 1)))
-                jitter = random.uniform(-self.reconnect_jitter, self.reconnect_jitter)
-                delay = max(1, delay * (1 + jitter))
-                logging.error("❌ Сервер недоступен, повторная попытка через %.1f секунд...", delay)
+                delay = max(1, int(reconnect_delay))
+                logging.error("❌ Сервер недоступен, повторная попытка через %d секунд...", delay)
                 logging.info("-> 🧹 Соединение недоступно, запускается очистка интерактивной сессии...")
                 await self.command_handler.cleanup_interactive_session()
                 await asyncio.sleep(delay)
             except Exception:
-                reconnect_attempts += 1
-                delay = min(self.reconnect_max_delay, self.reconnect_base_delay * (2 ** (reconnect_attempts - 1)))
-                jitter = random.uniform(-self.reconnect_jitter, self.reconnect_jitter)
-                delay = max(1, delay * (1 + jitter))
-                logging.exception("🔌 Непредвиденная ошибка подключения, повтор через %.1f секунд...", delay)
+                delay = max(1, int(reconnect_delay))
+                logging.exception("🔌 Непредвиденная ошибка подключения, повтор через %d секунд...", delay)
                 logging.info("-> 🧹 Непредвиденная ошибка, запускается очистка интерактивной сессии...")
                 await self.command_handler.cleanup_interactive_session()
                 await asyncio.sleep(delay)

@@ -445,8 +445,10 @@ def get_local_ip():
         return "127.0.0.1"
 
 
-def get_active_graphical_session():
-    """Возвращает (user, display, uid) активной графической сессии или (None, None, None)."""
+def get_active_graphical_sessions():
+    """Возвращает список (user, display, uid) активных графических сессий."""
+    sessions = set()
+
     try:
         p = subprocess.run(['loginctl', 'list-sessions'], capture_output=True, text=True)
         for line in p.stdout.split('\n'):
@@ -465,8 +467,8 @@ def get_active_graphical_session():
                                 display = info_line.split('=', 1)[1]
                             if info_line.startswith('User='):
                                 uid = info_line.split('=', 1)[1]
-                        if display and uid:
-                            return user, display, uid
+                        if display and uid and user:
+                            sessions.add((user, display, uid))
     except Exception:
         pass
 
@@ -484,10 +486,18 @@ def get_active_graphical_session():
                 uid_proc = subprocess.run(['id', '-u', user], capture_output=True, text=True)
                 if uid_proc.returncode == 0:
                     uid = uid_proc.stdout.strip()
-                    return user, display, uid
+                    sessions.add((user, display, uid))
     except Exception:
         pass
 
+    return list(sessions)
+
+
+def get_active_graphical_session():
+    """Возвращает (user, display, uid) активной графической сессии или (None, None, None)."""
+    sessions = get_active_graphical_sessions()
+    if sessions:
+        return sessions[0]
     return None, None, None
 
 
