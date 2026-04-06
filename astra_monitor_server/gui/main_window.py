@@ -1350,7 +1350,7 @@ class ServerGUI(QMainWindow):
         self.clients_tree = QTreeWidget()
         self.clients_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.clients_tree.setSortingEnabled(True)
-        self.clients_tree.setHeaderLabels(['IP адрес', 'Hostname', 'Примечание','Версия', 'CPU', 'RAM', 'Диск', 'Сеть (↓/↑)', 'Статус'])
+        self.clients_tree.setHeaderLabels(['IP адрес', 'Hostname', 'Примечание','Версия', 'CPU', 'RAM', 'Диск', 'Сеть (↓/↑)', 'Статус', 'ОС'])
         self.clients_tree.header().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.clients_tree.itemDoubleClicked.connect(self.open_client_tab_from_double_click)
         self.clients_tree.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -2263,6 +2263,7 @@ class ServerGUI(QMainWindow):
 
         data = self.client_data[client_id]
         hostname = data.get('hostname', 'N/A')
+        os_version = data.get('os_version', 'N/A')
         tags = data.get('tags', [])
         info_text = data.get('settings', {}).get('info_text', '')
         note_text = info_text
@@ -2281,6 +2282,7 @@ class ServerGUI(QMainWindow):
         tree_item.setText(4, f"{cpu}%")
         tree_item.setText(5, f"{mem}%")
         tree_item.setText(6, f"{round(data.get('disk_percent', 0))}%")
+        tree_item.setText(9, os_version)
         
         recv = data.get('bytes_recv_speed', 0) / 1024
         sent = data.get('bytes_sent_speed', 0) / 1024

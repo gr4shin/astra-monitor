@@ -259,7 +259,7 @@ class CommandHandler:
                     return {"apt_upgradable_list": packages}
 
                 elif apt_cmd.startswith("upgrade_packages:"):
-                    packages_str = command.split(":", 1)[1]
+                    packages_str = apt_cmd.split(":", 1)[1]
                     packages = ' '.join(re.findall(r'[\w.\-:]+', packages_str))
                     if packages: asyncio.create_task(self.stream_command_output(websocket, f"sudo apt-get install --only-upgrade -y {packages}"))
                     return None
@@ -569,6 +569,7 @@ rm -- \"$0\"
         def run_as_user(user, display, uid, cmd, timeout=15, capture_output=True):
             full_cmd = ['runuser', '-u', user, '--'] + cmd
             env = build_dbus_env(user, display, uid)
+            logging.info(f"{' '.join(full_cmd)} with env: {env}")
             try:
                 return subprocess.run(
                     full_cmd,
@@ -580,13 +581,15 @@ rm -- \"$0\"
                 logging.error("Ошибка runuser: %s", e)
                 return None
 
-        if not shutil.which('notify-send'):
-            return {"message_result": "error", "error": "❌ Команда 'notify-send' не найдена."}
+        # Проверяем наличие fly-dialog (родной для Astra Linux)
+        if not shutil.which('fly-dialog') and not shutil.which('notify-send'):
+            return {"message_result": "error", "error": "❌ Не найдены команды 'fly-dialog' или 'notify-send'."}
 
         try:
+            # Пробуем добавить xhost (опционально)
             try:
-                subprocess.run(["xhost", "+SI:localuser:root"], timeout=5, capture_output=False)
-                subprocess.run(["xhost", "+SI:localuser:*"], timeout=5, capture_output=False)
+                subprocess.run(["xhost", "+SI:localuser:root"], timeout=5, capture_output=True)        
+                subprocess.run(["xhost", "+SI:localuser:*"], timeout=5, capture_output=True)
             except Exception:
                 pass
 
@@ -594,43 +597,83 @@ rm -- \"$0\"
             if not sessions:
                 return {"error": "❌ Не найдено активных графических сессий"}
 
-            notify_cmd = [
-                'notify-send',
-                '--icon=dialog-information',
-                '--urgency=normal',
-                '--expire-time=10000',
-                'Сообщение от администратора',
-                message
-            ]
             failed = 0
-            delivered = 0
+            delivered = {}
+            
             for user, display, uid in sessions:
-                result = run_as_user(user, display, uid, notify_cmd, timeout=10, capture_output=True)
-                if result and result.returncode == 0:
-                    delivered += 1
-                    continue
-
+                result = None
+                
+                # Приоритет 1: fly-dialog (работает в Astra Linux)
+                if shutil.which('fly-dialog'):
+                    fly_cmd = [
+                        'fly-dialog',
+                        '--passivepopup',
+                        f'Сообщение от администратора: {message}',
+                        '10'  # 10 секунд показа
+                    ]
+                    result = run_as_user(user, display, uid, fly_cmd, timeout=10, capture_output=True)
+                    if result and result.returncode == 0:
+                        delivered['fly-dialog'] = {"user": user, "display": display, "uid": uid, "cmd": fly_cmd, "result":result.stdout.decode().strip()}
+                        continue
+                
+                # Приоритет 2: notify-send (если fly-dialog не сработал)
+                if shutil.which('notify-send') and (result is None or result.returncode != 0):
+                    notify_cmd = [
+                        'notify-send',
+                        '--icon=dialog-information',
+                        '--urgency=normal',
+                        '--expire-time=10000',
+                        'Сообщение от администратора',
+                        message
+                    ]
+                    result = run_as_user(user, display, uid, notify_cmd, timeout=10, capture_output=True)
+                    if result and result.returncode == 0:
+                        delivered['notify-send'] = {"user": user, "display": display, "uid": uid, "cmd": notify_cmd, "result":result.stdout.decode().strip()}
+                        continue
+                
+                # Приоритет 3: zenity (если первые два не сработали)
                 if shutil.which('zenity'):
                     short_msg = message[:200] + "..." if len(message) > 200 else message
                     zenity_cmd = [
                         'zenity',
                         '--info',
                         '--title=Сообщение от администратора',
-                        '--text=' + short_msg,
+                        f'--text={short_msg}',
                         '--width=400',
                         '--timeout=10'
                     ]
                     result = run_as_user(user, display, uid, zenity_cmd, timeout=15, capture_output=True)
                     if result and result.returncode == 0:
-                        delivered += 1
+                        delivered["zenity"] = {"user": user, "display": display, "uid": uid, "cmd": zenity_cmd, "result":result.stdout.decode().strip()}
                         continue
-
+                
+                # Приоритет 4: kdialog (если установлен KDE)
+                if shutil.which('kdialog'):
+                    kdialog_cmd = [
+                        'kdialog',
+                        '--passivepopup',
+                        message,
+                        '10'
+                    ]
+                    result = run_as_user(user, display, uid, kdialog_cmd, timeout=10, capture_output=True)
+                    if result and result.returncode == 0:
+                        delivered["kdialog"] = {"user": user, "display": display, "uid": uid, "cmd": kdialog_cmd, "result":result.stdout.decode().strip()}
+                        continue
+                
                 failed += 1
-
+                logging.warning(f"Не удалось отправить сообщение пользователю {user} (display={display})")
+            
             if failed:
-                return {"message_result": "error", "error": f"❌ Не удалось отправить уведомление для {failed} сессий."}
+                return {
+                    "message_result": "error", 
+                    "error": f"❌ Не удалось отправить уведомление для {failed} сессий."
+                }
 
-            return {"message_result": "success", "info": f"✅ Сообщение отправлено в {delivered} сессий."}
+            return {
+                "message_result": "success", 
+                "info": f"✅ Сообщение отправлено в {len(delivered)} сессий. {json.dumps(delivered, indent=2, ensure_ascii=False)}"
+            }
+            
         except Exception as e:
             logging.error("Критическая ошибка отправки сообщения: %s", e)
             return {"message_result": "error", "error": f"❌ Критическая ошибка: {str(e)}"}

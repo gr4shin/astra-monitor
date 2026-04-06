@@ -12,7 +12,7 @@ import uuid
 import random
 
 from astra_monitor_client.utils.config import deobfuscate_config, OBFUSCATION_KEY
-from astra_monitor_client.utils.system_utils import SystemMonitor, get_local_ip
+from astra_monitor_client.utils.system_utils import SystemMonitor, get_astra_version, get_local_ip
 from astra_monitor_client.handlers.command_handler import CommandHandler
 
 class SystemMonitorClient:
@@ -177,6 +177,8 @@ class SystemMonitorClient:
                 "bytes_sent_speed": bytes_sent_speed,
                 "bytes_recv_speed": bytes_recv_speed,
                 "platform": platform.platform(),
+                "release": platform.release(),
+                "os_version": get_astra_version(),
                 "local_ip": self.local_ip
             }
         except Exception as e:
@@ -225,9 +227,10 @@ class SystemMonitorClient:
                         "client_info": {
                             "hostname": self.hostname,
                             "os_type": platform.system(),
-                            "platform_full": platform.platform(),
+                            "platform": platform.platform(),
+                            "release": platform.release(),
+                            "os_version": get_astra_version(),
                             "settings": {k: v for k, v in self.settings.items() if k != "client_id"}
-
                         }
                     })
                     async with self.send_lock:

@@ -1,3 +1,4 @@
+import logging
 import platform
 import os
 import subprocess
@@ -500,13 +501,40 @@ def get_active_graphical_session():
         return sessions[0]
     return None, None, None
 
-
 def build_dbus_env(user, display, uid):
     """Готовит окружение для запуска GUI/DBUS команд от имени пользователя."""
     env = os.environ.copy()
     env['DISPLAY'] = display
     env['XAUTHORITY'] = f'/home/{user}/.Xauthority'
     env['HOME'] = f'/home/{user}'
-    env['DBUS_SESSION_BUS_ADDRESS'] = f'unix:path=/run/user/{uid}/bus'
+    env['USER'] = user
+    env['LOGNAME'] = user
+    env['XDG_RUNTIME_DIR'] = f'/run/user/{uid}'
+    env['LANG'] = 'ru_RU.UTF-8'
+    
+    # Пытаемся получить реальный DBUS_SESSION_BUS_ADDRESS из процесса dbus-daemon
+    try:
+        result = subprocess.run(
+            ['pgrep', '-u', user, '-x', 'dbus-daemon'],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            pid = result.stdout.strip().split('\n')[0]
+            with open(f'/proc/{pid}/environ', 'rb') as f:
+                proc_env = f.read().decode('utf-8', errors='ignore').split('\x00')
+                for entry in proc_env:
+                    if entry.startswith('DBUS_SESSION_BUS_ADDRESS='):
+                        env['DBUS_SESSION_BUS_ADDRESS'] = entry.split('=', 1)[1]
+                        break
+    except Exception as e:
+        logging.warning(f"Не удалось получить DBUS адрес из dbus-daemon: {e}")
+    
+    # Fallback на стандартный путь, если не нашли
+    if 'DBUS_SESSION_BUS_ADDRESS' not in env:
+        env['DBUS_SESSION_BUS_ADDRESS'] = f'unix:path=/run/user/{uid}/bus'
+    
     env.pop('LD_LIBRARY_PATH', None)
+    env.pop('DBUS_STARTER_ADDRESS', None)
+    env.pop('DBUS_STARTER_BUS_TYPE', None)
+    
     return env
