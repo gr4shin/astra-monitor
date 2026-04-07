@@ -37,6 +37,7 @@ class ScreenshotWidget(QWidget):
         self.auto_refresh_btn = QPushButton("Автообновление")
         self.auto_refresh_btn.setCheckable(True)
         self.auto_refresh_btn.clicked.connect(self.toggle_auto_refresh)
+        self.auto_refresh_btn.setChecked(self.settings_screenshot.get('enabled', False))
         control_layout.addWidget(self.auto_refresh_btn)
 
         self.monitor_mode_combo = QComboBox()
@@ -83,6 +84,7 @@ class ScreenshotWidget(QWidget):
         layout.addWidget(image_group)
 
         self._apply_icons()
+        self._update_auto_refresh_state(self.auto_refresh_btn.isChecked())
         
     def take_screenshot(self):
         """Запрос скриншота с определенным качеством"""
@@ -96,12 +98,17 @@ class ScreenshotWidget(QWidget):
     
     def toggle_auto_refresh(self, checked):
         """Включение/выключение автоматического обновления"""
-        if checked:
+        self._update_auto_refresh_state(checked)
+
+    def _update_auto_refresh_state(self, enabled):
+        if enabled:
             delay = self.settings_screenshot.get('refresh_delay', 5) * 1000  # convert to milliseconds
             self.auto_refresh_timer.start(delay)
+            self.auto_refresh_btn.setChecked(True)
             self.log_callback(f"Автообновление включено (каждые {self.settings_screenshot.get('refresh_delay', 5)} сек)")
         else:
             self.auto_refresh_timer.stop()
+            self.auto_refresh_btn.setChecked(False)
             self.log_callback("Автообновление выключено")
 
     def update_monitor_mode(self):
@@ -112,6 +119,13 @@ class ScreenshotWidget(QWidget):
             self.ws_server.send_command(self.client_id, f"screenshot_settings:{json.dumps({'monitor_mode': mode})}"),
             self.ws_server.loop
         )
+
+    def apply_settings(self, screenshot_settings):
+        if not isinstance(screenshot_settings, dict):
+            return
+        self.settings_screenshot.update(screenshot_settings)
+        self.monitor_mode_combo.setCurrentIndex(0 if self.settings_screenshot.get('monitor_mode', 'all') == 'all' else 1)
+        self._update_auto_refresh_state(self.settings_screenshot.get('enabled', False))
     
     def update_screenshot(self, image_data, quality, timestamp):
         """Обновление отображаемого скриншота"""

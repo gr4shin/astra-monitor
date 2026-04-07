@@ -5,6 +5,7 @@ import subprocess
 import socket
 import shutil
 import re
+import glob
 from datetime import datetime
 import json
 
@@ -433,6 +434,71 @@ def get_camera_info():
         return cameras
     except Exception:
         return []
+
+def capture_camera_snapshot(timeout=10):
+    """Снимает один кадр с первой доступной видеокамеры и возвращает байты JPEG."""
+    devices = sorted(glob.glob('/dev/video*'))
+    if not devices:
+        logging.info("📷 Камера не найдена: устройства /dev/video* отсутствуют")
+        return None
+
+    camera_device = devices[0]
+    logging.info("📷 Используется видеоустройство камеры: %s", camera_device)
+
+    ffmpeg_path = shutil.which('ffmpeg')
+    if ffmpeg_path:
+        try:
+            ffmpeg_cmd = [
+                ffmpeg_path,
+                '-y', '-nostdin', '-loglevel', 'error',
+                '-f', 'video4linux2', '-thread_queue_size', '512',
+                '-i', camera_device,
+                '-frames:v', '1', '-q:v', '2',
+                '-f', 'image2pipe', '-vcodec', 'mjpeg', 'pipe:1'
+            ]
+            logging.info("📷 Запуск ffmpeg: %s", ' '.join(ffmpeg_cmd[:6]) + ' ...')
+            snapshot = subprocess.run(ffmpeg_cmd, capture_output=True, timeout=timeout)
+            if snapshot.returncode == 0 and snapshot.stdout:
+                return snapshot.stdout
+            logging.warning("📷 ffmpeg вернул код %s, stderr: %s", snapshot.returncode, snapshot.stderr.decode('utf-8', errors='ignore'))
+        except Exception as e:
+            logging.warning("📷 Ошибка ffmpeg при захвате камеры: %s", e)
+    else:
+        logging.info("📷 ffmpeg не найден, пробую другие утилиты")
+
+    fswebcam_path = shutil.which('fswebcam')
+    if fswebcam_path:
+        try:
+            fswebcam_cmd = [
+                fswebcam_path, '--no-banner', '-d', camera_device,
+                '--resolution', '640x480', '-',
+            ]
+            logging.info("📷 Запуск fswebcam: %s", ' '.join(fswebcam_cmd[:4]) + ' ...')
+            snapshot = subprocess.run(fswebcam_cmd, capture_output=True, timeout=timeout)
+            if snapshot.returncode == 0 and snapshot.stdout:
+                return snapshot.stdout
+            logging.warning("📷 fswebcam вернул код %s, stderr: %s", snapshot.returncode, snapshot.stderr.decode('utf-8', errors='ignore'))
+        except Exception as e:
+            logging.warning("📷 Ошибка fswebcam при захвате камеры: %s", e)
+
+    v4l2_path = shutil.which('v4l2-ctl')
+    if v4l2_path:
+        try:
+            v4l2_cmd = [
+                v4l2_path, '--device', camera_device,
+                '--stream-mmap=1', '--stream-count=1', '--stream-to=-'
+            ]
+            logging.info("📷 Запуск v4l2-ctl: %s", ' '.join(v4l2_cmd))
+            snapshot = subprocess.run(v4l2_cmd, capture_output=True, timeout=timeout)
+            if snapshot.returncode == 0 and snapshot.stdout:
+                return snapshot.stdout
+            logging.warning("📷 v4l2-ctl вернул код %s, stderr: %s", snapshot.returncode, snapshot.stderr.decode('utf-8', errors='ignore'))
+        except Exception as e:
+            logging.warning("📷 Ошибка v4l2-ctl при захвате камеры: %s", e)
+
+    logging.info("📷 Не удалось захватить кадр с камеры ни одной утилитой")
+    return None
+
 
 def get_local_ip():
     """Получение локального IP-адреса"""

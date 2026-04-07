@@ -5,7 +5,8 @@ import asyncio
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QListWidget,
     QStackedWidget, QPushButton, QSplitter, QTextEdit,
-    QLineEdit, QLabel, QMessageBox, QSpinBox, QCheckBox, QFormLayout, QComboBox)
+    QLineEdit, QLabel, QMessageBox, QSpinBox, QCheckBox, QFormLayout, QComboBox,
+    QAbstractItemView)
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSize
 from PyQt5.QtGui import QFont, QIntValidator, QFontMetrics, QColor
 
@@ -80,7 +81,11 @@ class ClientDetailTab(QWidget):
         menu_group.setMinimumWidth(220)
         
         self.menu_list = QListWidget()
+        self.menu_list.setObjectName("clientMenuList")
         self.menu_list.setMinimumWidth(200)
+        self.menu_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.menu_list.setSpacing(6)
+        self.menu_list.setIconSize(QSize(18, 18))
         self.content_stack = QStackedWidget()
 
         # Create a map of menu item names to their corresponding widgets and visibility
@@ -125,6 +130,7 @@ class ClientDetailTab(QWidget):
         self.screenshot_widget = self.menu_map["Экран клиента"][0]
         self.metrics_history_widget = self.menu_map["История метрик"][0]
         self.client_log_output = self.menu_map["Журнал клиента"][0]
+        self.client_log_output.setObjectName("clientLogOutput")
         self.client_log_output.setReadOnly(True)
 
         self.menu_list.currentRowChanged.connect(self.change_content)
@@ -136,6 +142,15 @@ class ClientDetailTab(QWidget):
         layout.addWidget(self.content_stack, 3)
         
         self.menu_list.setCurrentRow(0)
+        self._apply_client_tab_styles()
+        self._request_update_process_list()
+
+    def _request_update_process_list(self):
+        if self.ws_server and self.client_id:
+            asyncio.run_coroutine_threadsafe(
+                self.ws_server.send_command(self.client_id, "apt:list_processes"),
+                self.ws_server.loop
+            )
 
     def _create_commands_widget(self):
         commands_widget = QWidget()
@@ -201,19 +216,30 @@ class ClientDetailTab(QWidget):
 
         # Нижняя часть: Терминал
         terminal_group = QGroupBox("Терминал")
+        terminal_group.setStyleSheet(
+            "QGroupBox { background-color: #0f172a; border: 1px solid #334155; border-radius: 12px; }"
+            "QGroupBox::title { color: #e2e8f0; subcontrol-origin: margin; left: 12px; padding: 0 6px; }"
+        )
         terminal_layout = QVBoxLayout(terminal_group)
         self.terminal_output = TerminalView()
+        self.terminal_output.setObjectName("clientTerminalOutput")
         self.terminal_output.setReadOnly(True)
         self.terminal_output.setFont(QFont("Monospace", 10))
-        self.terminal_output.setStyleSheet("background-color: #2b2b2b; color: #f0f0f0;")
+        self.terminal_output.setStyleSheet(
+            "QTextEdit#clientTerminalOutput { background-color: #0b1220; color: #e2e8f0; border: 1px solid #334155; border-radius: 10px; }"
+        )
         self.terminal_output.setLineWrapMode(QTextEdit.NoWrap)
-        self.terminal_output.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
-        self.terminal_output.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.terminal_output.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.terminal_output.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.terminal_output.resized.connect(self._on_terminal_resize)
         self.terminal_output.keyPressed.connect(self._handle_terminal_key)
         
         self.terminal_input = QLineEdit()
         self.terminal_input.setFont(QFont("Monospace", 10))
+        self.terminal_input.setPlaceholderText("Введите команду и нажмите Enter")
+        self.terminal_input.setStyleSheet(
+            "QLineEdit { background-color: #111827; color: #e2e8f0; border: 1px solid #334155; border-radius: 8px; padding: 6px; }"
+        )
         self.terminal_input.returnPressed.connect(self.execute_terminal_command)
 
         self.focus_hint = QLabel("Фокус в терминале: F2, выход — Esc")
@@ -222,6 +248,23 @@ class ClientDetailTab(QWidget):
         self.focus_hint.setVisible(False)
 
         terminal_layout.addWidget(self.terminal_output)
+
+        terminal_controls_layout = QHBoxLayout()
+        self.start_terminal_btn = QPushButton("Запустить терминал")
+        self.stop_terminal_btn = QPushButton("Остановить терминал")
+        self.stop_terminal_btn.setEnabled(False)
+        self.start_terminal_btn.clicked.connect(lambda: self.start_interactive_session_if_not_running())
+        self.stop_terminal_btn.clicked.connect(self.stop_interactive_session)
+        terminal_controls_layout.addWidget(self.start_terminal_btn)
+        terminal_controls_layout.addWidget(self.stop_terminal_btn)
+        terminal_controls_layout.addStretch()
+        terminal_layout.addLayout(terminal_controls_layout)
+
+        self.terminal_status_label = QLabel("Статус: неактивен")
+        self.terminal_status_label.setAlignment(Qt.AlignRight)
+        self.terminal_status_label.setStyleSheet("color: #94a3b8;")
+        terminal_layout.addWidget(self.terminal_status_label)
+
         terminal_layout.addWidget(self.focus_hint)
         terminal_layout.addWidget(self.terminal_input)
         splitter.addWidget(terminal_group)
@@ -259,6 +302,34 @@ class ClientDetailTab(QWidget):
         monitor_mode = self.client_settings.get('screenshot', {}).get('monitor_mode', 'all')
         self.screenshot_mode.setCurrentIndex(0 if monitor_mode == 'all' else 1)
         screenshot_layout.addRow("Режим скриншота:", self.screenshot_mode)
+
+        # Группа настроек доказательств
+        evidence_group = QGroupBox("Настройки доказательств")
+        evidence_layout = QFormLayout(evidence_group)
+
+        self.evidence_enabled = QCheckBox("Включить сбор доказательств")
+        self.evidence_enabled.setChecked(self.client_settings.get('evidence', {}).get('enabled', False))
+        evidence_layout.addRow(self.evidence_enabled)
+
+        self.camera_enabled = QCheckBox("Делать фото с камеры при обнаружении")
+        self.camera_enabled.setChecked(self.client_settings.get('evidence', {}).get('camera_enabled', False))
+        evidence_layout.addRow(self.camera_enabled)
+
+        self.evidence_interval = QLineEdit(str(self.client_settings.get('evidence', {}).get('interval', 10)))
+        self.evidence_interval.setValidator(QIntValidator(1, 3600))
+        evidence_layout.addRow("Интервал проверки (сек):", self.evidence_interval)
+
+        self.evidence_min_interval = QLineEdit(str(self.client_settings.get('evidence', {}).get('min_report_interval', 300)))
+        self.evidence_min_interval.setValidator(QIntValidator(60, 86400))
+        evidence_layout.addRow("Мин. интервал между отчетами (сек):", self.evidence_min_interval)
+
+        self.evidence_retention = QLineEdit(str(self.client_settings.get('evidence', {}).get('retention_days', 30)))
+        self.evidence_retention.setValidator(QIntValidator(1, 365))
+        evidence_layout.addRow("Хранить доказательства (дней):", self.evidence_retention)
+
+        self.evidence_blacklist = QLineEdit(", ".join(self.client_settings.get('evidence', {}).get('monitor_blacklist', [])))
+        self.evidence_blacklist.setPlaceholderText("firefox, chrome, steam, minecraft")
+        evidence_layout.addRow("Черный список процессов:", self.evidence_blacklist)
 
         # Группа настроек мониторинга
         monitoring_group = QGroupBox("Настройки мониторинга")
@@ -319,6 +390,7 @@ class ClientDetailTab(QWidget):
         settings_buttons_layout.addWidget(reset_settings_btn)
 
         settings_layout.addWidget(screenshot_group)
+        settings_layout.addWidget(evidence_group)
         settings_layout.addWidget(monitoring_group)
         settings_layout.addWidget(connection_group)
         settings_layout.addWidget(security_group)
@@ -350,6 +422,107 @@ class ClientDetailTab(QWidget):
             if not icon.isNull():
                 button.setIcon(icon)
                 button.setIconSize(QSize(18, 18))
+
+    def _apply_client_tab_styles(self):
+        self.setStyleSheet("""
+            QListWidget#clientMenuList {
+                background: rgba(255, 255, 255, 0.95);
+                border: 1px solid #d1d5db;
+                border-radius: 12px;
+                padding: 8px;
+            }
+            QListWidget#clientMenuList::item {
+                padding: 14px 16px;
+                min-height: 42px;
+                margin: 4px 0px;
+                border-radius: 10px;
+            }
+            QListWidget#clientMenuList::item:hover {
+                background: #eff6ff;
+            }
+            QListWidget#clientMenuList::item:selected {
+                background: #dbeafe;
+                color: #1f2937;
+            }
+            QGroupBox {
+                background-color: rgba(255, 255, 255, 0.95);
+                border: 1px solid #d1d5db;
+                border-radius: 12px;
+                margin-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 6px;
+                color: #111827;
+                font-weight: 600;
+            }
+            QPushButton {
+                border-radius: 10px;
+                padding: 8px 14px;
+                background-color: #ffffff;
+                border: 1px solid #cbd5e1;
+            }
+            QPushButton:hover {
+                background-color: #eff6ff;
+            }
+            QPushButton:pressed {
+                background-color: #dbeafe;
+            }
+            QLineEdit, QSpinBox, QComboBox {
+                background-color: #f8fafc;
+                border: 1px solid #cbd5e1;
+                border-radius: 10px;
+                padding: 6px;
+            }
+            QTextEdit#clientLogOutput {
+                background-color: #f8fafc;
+                border: 1px solid #cbd5e1;
+                border-radius: 10px;
+                padding: 6px;
+            }
+            QComboBox::drop-down {
+                border-left: 1px solid #cbd5e1;
+            }
+            QCheckBox {
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border-radius: 5px;
+                border: 1px solid #64748b;
+                background-color: #ffffff;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #2563eb;
+                border-color: #2563eb;
+            }
+            QCheckBox::indicator:checked:hover {
+                background-color: #1d4ed8;
+                border-color: #1d4ed8;
+            }
+            QScrollBar:vertical, QScrollBar:horizontal {
+                background: #e2e8f0;
+                border-radius: 8px;
+            }
+            QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+                background: #94a3b8;
+                border-radius: 8px;
+            }
+            QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {
+                background: #64748b;
+            }
+        """)
+
+    def _validate_int_input(self, field_widget, min_value, max_value):
+        text = field_widget.text().strip()
+        if not text:
+            raise ValueError
+        value = int(text)
+        if value < min_value or value > max_value:
+            raise ValueError
+        return value
 
     def get_full_system_info(self):
         """Запрос полной информации о системе"""
@@ -488,10 +661,12 @@ class ClientDetailTab(QWidget):
         self.terminal_emulator.reset()
         self.terminal_output.setHtml(self.terminal_emulator.render_html())
         self._sync_terminal_size()
+        self._update_terminal_controls()
         self.log_message_requested.emit(f"Интерактивная сессия запущена.")
 
     def handle_interactive_stopped(self):
         self.interactive_session = False
+        self._update_terminal_controls()
         self.log_message_requested.emit(f"Интерактивная сессия завершена.")
         self.append_to_terminal("\n[+] Сессия завершена. Для старта новой сессии, введите команду.\n")
 
@@ -515,8 +690,10 @@ class ClientDetailTab(QWidget):
         rows = max(1, self.terminal_output.viewport().height() // metrics.height())
         self._on_terminal_resize(rows, cols)
 
-    def update_prompt(self, path): # DEPRECATED
-        pass
+    def update_prompt(self, prompt):
+        """Обновить текст подсказки в терминале клиента."""
+        if prompt:
+            self.append_to_terminal(f"[Смена директории] {prompt}\n")
 
     def run_command_in_terminal(self, command):
         """Runs a command in the interactive terminal session without switching tabs."""
@@ -578,18 +755,25 @@ class ClientDetailTab(QWidget):
                 self.ws_server.send_command(self.client_id, f"interactive:start:{shell_cmd}"),
                 self.ws_server.loop
             )
-            if initial_command:
+            self._update_terminal_controls()
+            if initial_command and isinstance(initial_command, str):
                 # Wait a bit for the session to start before sending the first command
                 asyncio.get_event_loop().call_later(0.5, lambda: self.execute_command(initial_command))
 
     def stop_interactive_session(self):
-        """Stops the interactive terminal session.""" 
+        """Stops the interactive terminal session."""
         if self.interactive_session:
             self.log_message_requested.emit("Остановка интерактивной сессии...")
             asyncio.run_coroutine_threadsafe(
                 self.ws_server.send_command(self.client_id, "interactive:stop"),
                 self.ws_server.loop
             )
+            self._update_terminal_controls()
+
+    def _update_terminal_controls(self):
+        self.start_terminal_btn.setEnabled(not self.interactive_session)
+        self.stop_terminal_btn.setEnabled(self.interactive_session)
+        self.terminal_status_label.setText("Статус: активно" if self.interactive_session else "Статус: неактивен")
     
     def add_custom_command(self):
         """Добавление новой кастомной команды"""
@@ -678,18 +862,26 @@ class ClientDetailTab(QWidget):
         """Сохранение настроек"""
         try:
             settings = {
-                'monitoring_interval': int(self.monitoring_interval.text()),
+                'monitoring_interval': self._validate_int_input(self.monitoring_interval, 1, 3600),
                 'auto_refresh': self.auto_refresh.isChecked(),
-                'reconnect_delay': int(self.reconnect_delay.text()),
-                'max_reconnect_attempts': int(self.max_reconnect_attempts.text()),
+                'reconnect_delay': self._validate_int_input(self.reconnect_delay, 1, 60),
+                'max_reconnect_attempts': self._validate_int_input(self.max_reconnect_attempts, 1, 100),
                 'enable_encryption': self.enable_encryption.isChecked(),
                 'log_sensitive_commands': self.log_sensitive_commands.isChecked(),
-                'info_text': str(self.info_text.text()),
+                'info_text': str(self.info_text.text()).strip(),
                 'screenshot': {
                     'quality': self.screenshot_quality.value(),
                     'refresh_delay': self.screenshot_delay.value(),
                     'enabled': self.screenshot_auto.isChecked(),
                     'monitor_mode': 'all' if self.screenshot_mode.currentIndex() == 0 else 'primary'
+                },
+                'evidence': {
+                    'enabled': self.evidence_enabled.isChecked(),
+                    'camera_enabled': self.camera_enabled.isChecked(),
+                    'interval': self._validate_int_input(self.evidence_interval, 1, 3600),
+                    'min_report_interval': self._validate_int_input(self.evidence_min_interval, 60, 86400),
+                    'retention_days': self._validate_int_input(self.evidence_retention, 1, 365),
+                    'monitor_blacklist': [item.strip() for item in self.evidence_blacklist.text().split(',') if item.strip()]
                 }
             }
             
@@ -699,14 +891,16 @@ class ClientDetailTab(QWidget):
             )
             
             self.settings_changed.emit(settings)
+            if hasattr(self, 'screenshot_widget'):
+                self.screenshot_widget.apply_settings(settings['screenshot'])
             tags = [t.strip() for t in self.tags_input.text().split(",") if t.strip()]
             self.meta_changed.emit({"tags": tags})
             client_name = self.client_data.get('hostname', self.client_id)
-            self.log_message_requested.emit(f"Настройки отправлены клиенту {client_name}. Полностью применяться после переподключения клиента.")
+            self.log_message_requested.emit(f"Настройки отправлены клиенту {client_name}. Клиент будет переподключен автоматически.")
             if self.main_window:
-                self.main_window.show_toast("Настройки отправлены клиенту. Полностью применятся после переподключения.", level="success")
+                self.main_window.show_toast("Настройки отправлены клиенту. Клиент будет переподключен автоматически.", level="success")
             else:
-                QMessageBox.information(self, "Успех", "Настройки успешно отправлены клиенту! Полностью применяться после переподключения клиента.")
+                QMessageBox.information(self, "Успех", "Настройки успешно отправлены клиенту! Клиент будет переподключен автоматически.")
             
         except ValueError:
             if self.main_window:
@@ -735,5 +929,11 @@ class ClientDetailTab(QWidget):
             self.screenshot_delay.setValue(5)
             self.screenshot_auto.setChecked(True)
             self.screenshot_mode.setCurrentIndex(0)
+            self.evidence_enabled.setChecked(False)
+            self.camera_enabled.setChecked(False)
+            self.evidence_interval.setText("10")
+            self.evidence_min_interval.setText("300")
+            self.evidence_retention.setText("30")
+            self.evidence_blacklist.setText("")
             client_name = self.client_data.get('hostname', self.client_id)
             self.log_message_requested.emit(f"[Сброс] Настройки клиента {client_name}")

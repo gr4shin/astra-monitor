@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QGroupBox
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QGroupBox, QLabel
 from PyQt5.QtGui import QPainter, QColor, QPen, QFontMetrics
 from PyQt5.QtCore import Qt
 
@@ -98,6 +98,13 @@ class MetricsHistoryWidget(QWidget):
         group = QGroupBox("История метрик")
         group_layout = QVBoxLayout(group)
 
+        legend_label = QLabel(
+            '<span style="color:#ef4444;">●</span> CPU  '
+            '<span style="color:#22c55e;">●</span> RAM  '
+            '<span style="color:#3b82f6;">●</span> Disk'
+        )
+        legend_label.setTextFormat(Qt.RichText)
+        group_layout.addWidget(legend_label)
         group_layout.addWidget(self.chart_widget)
         layout.addWidget(group)
 

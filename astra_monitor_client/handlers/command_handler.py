@@ -68,6 +68,29 @@ class CommandHandler:
                 
                 return {"screenshot_settings_updated": self.client.screenshot_settings}
 
+            elif command.startswith("evidence_settings:"):
+                settings_json = command.split(":", 1)[1]
+                new_settings = json.loads(settings_json)
+                if "monitor_blacklist" in new_settings and isinstance(new_settings["monitor_blacklist"], str):
+                    new_settings["monitor_blacklist"] = [new_settings["monitor_blacklist"]]
+
+                if "min_report_interval" in new_settings:
+                    new_settings["min_report_interval"] = max(60, int(new_settings["min_report_interval"]))
+                if "interval" in new_settings:
+                    new_settings["interval"] = max(5, int(new_settings["interval"]))
+                if "retention_days" in new_settings:
+                    new_settings["retention_days"] = max(1, int(new_settings["retention_days"]))
+
+                evidence_settings = self.client.settings.get("evidence", {})
+                if not isinstance(evidence_settings, dict):
+                    evidence_settings = {}
+                evidence_settings.update(new_settings)
+                self.client.settings["evidence"] = evidence_settings
+                self.client.save_config()
+                if hasattr(self.client, "evidence_handler"):
+                    self.client.evidence_handler.update_settings()
+                return {"evidence_settings_updated": self.client.settings["evidence"]}
+
             elif command == "get_full_system_info":
                 full_info = get_full_system_info()
                 return {"full_system_info": full_info}
@@ -649,11 +672,31 @@ class CommandHandler:
             if 'monitoring_interval' in settings:
                 self.client.REFRESH_INTERVAL = settings['monitoring_interval']
 
+            if 'reconnect_delay' in settings:
+                self.client.reconnect_base_delay = settings['reconnect_delay']
+            if 'reconnect_max_delay' in settings:
+                self.client.reconnect_max_delay = settings['reconnect_max_delay']
+            if 'reconnect_jitter' in settings:
+                self.client.reconnect_jitter = settings['reconnect_jitter']
+            if 'max_reconnect_attempts' in settings:
+                self.client.reconnect_max_attempts = settings['max_reconnect_attempts']
+
             if "screenshot" in settings:
                 if not isinstance(settings["screenshot"], dict):
                     settings["screenshot"] = {}
                 self.client.screenshot_settings.update(settings["screenshot"])
                 self.client.settings["screenshot"] = self.client.screenshot_settings
+
+            if "evidence" in settings:
+                if not isinstance(settings["evidence"], dict):
+                    settings["evidence"] = {}
+                evidence_settings = self.client.settings.get("evidence", {})
+                if not isinstance(evidence_settings, dict):
+                    evidence_settings = {}
+                evidence_settings.update(settings["evidence"])
+                self.client.settings["evidence"] = evidence_settings
+                if hasattr(self.client, "evidence_handler"):
+                    self.client.evidence_handler.update_settings()
 
             screenshot_settings = self.client.settings.get("screenshot", {})
             if "quality" in screenshot_settings:
@@ -669,6 +712,8 @@ class CommandHandler:
                     screenshot_settings["monitor_mode"] = "all"
 
             self.client.save_config()
+            if hasattr(self.client, 'request_reconnect'):
+                await self.client.request_reconnect()
             logging.info("✅ Новые настройки применены и сохранены: %s", self.client.settings)
             return {"settings_applied": "success", "new_settings": self.client.settings}
             

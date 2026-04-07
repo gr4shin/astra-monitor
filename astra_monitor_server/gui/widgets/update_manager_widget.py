@@ -32,7 +32,7 @@ class UpdateManagerWidget(QWidget):
         status_frame.setFrameStyle(QFrame.StyledPanel)
         status_layout = QHBoxLayout(status_frame)
         
-        self.status_label = QLabel("✅ Готов")
+        self.status_label = QLabel("Готов")
         self.status_label.setStyleSheet("QLabel { padding: 5px; }")
         status_layout.addWidget(self.status_label)
         
@@ -42,12 +42,12 @@ class UpdateManagerWidget(QWidget):
         self.process_indicator.setFixedWidth(150)
         status_layout.addWidget(self.process_indicator)
         
-        self.stop_process_btn = QPushButton("⏹️ Остановить")
+        self.stop_process_btn = QPushButton("Остановить")
         self.stop_process_btn.setVisible(False)
         self.stop_process_btn.clicked.connect(self.stop_current_process)
         status_layout.addWidget(self.stop_process_btn)
         
-        self.reconnect_btn = QPushButton("🔄 Переподключиться")
+        self.reconnect_btn = QPushButton("Переподключиться")
         self.reconnect_btn.setVisible(False)
         self.reconnect_btn.clicked.connect(self.reconnect_to_process)
         status_layout.addWidget(self.reconnect_btn)
@@ -85,19 +85,19 @@ class UpdateManagerWidget(QWidget):
         pkg_layout = QVBoxLayout(pkg_group)
         
         pkg_actions_layout = QHBoxLayout()
-        self.check_updates_btn = QPushButton("Шаг 1: Обновить списки пакетов (apt update)")
+        self.check_updates_btn = QPushButton("Обновить списки пакетов")
         self.check_updates_btn.clicked.connect(self.check_for_updates)
         
-        self.list_upgradable_btn = QPushButton("Шаг 2: Показать обновляемые пакеты")
+        self.list_upgradable_btn = QPushButton("Показать обновляемые пакеты")
         self.list_upgradable_btn.clicked.connect(self.list_upgradable_packages)
         
-        self.install_selected_btn = QPushButton("Установить выбранные")
+        self.install_selected_btn = QPushButton("Установить выбранные пакеты")
         self.install_selected_btn.clicked.connect(self.install_selected_updates)
         
-        self.install_all_btn = QPushButton("Обновить всю систему")
+        self.install_all_btn = QPushButton("Обновить систему")
         self.install_all_btn.clicked.connect(self.install_all_updates)
         
-        self.refresh_status_btn = QPushButton("🔄 Статус процессов")
+        self.refresh_status_btn = QPushButton("Статус процессов")
         self.refresh_status_btn.clicked.connect(self.refresh_process_status)
         
         pkg_actions_layout.addWidget(self.check_updates_btn)
@@ -169,6 +169,8 @@ class UpdateManagerWidget(QWidget):
             self.install_all_btn: ("system_update_alt.svg", QColor("#16a34a")),
             self.clear_output_btn: ("clear_all.svg", QColor("#64748b")),
             self.refresh_status_btn: ("refresh.svg", QColor("#8b5cf6")),
+            self.stop_process_btn: ("stop.svg", QColor("#ef4444")),
+            self.reconnect_btn: ("refresh.svg", QColor("#2563eb")),
         }
         for button, (icon_name, color) in icon_map.items():
             icon = load_icon_from_assets(icon_name, color=color, size=18)
@@ -199,7 +201,7 @@ class UpdateManagerWidget(QWidget):
     def check_for_updates(self):
         """Запуск apt update в фоне"""
         self.updates_table.setRowCount(0)
-        self.append_output("🚀 Запуск apt update в фоновом режиме...")
+        self.append_output("Запуск apt update в фоновом режиме...")
         self.set_process_status(True, "Выполняется apt update...")
         
         asyncio.run_coroutine_threadsafe(
@@ -229,7 +231,7 @@ class UpdateManagerWidget(QWidget):
             return
 
         packages_str = ' '.join(selected_packages)
-        self.append_output(f"🚀 Запуск установки пакетов в фоне: {packages_str}")
+        self.append_output(f"Запуск установки пакетов в фоновом режиме: {packages_str}")
         self.set_process_status(True, f"Установка {len(selected_packages)} пакетов...")
         
         asyncio.run_coroutine_threadsafe(
@@ -244,7 +246,7 @@ class UpdateManagerWidget(QWidget):
                                     "Это может занять длительное время и процесс продолжится даже при отключении.",
                                     QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
-            self.append_output("🚀 Запущено полное обновление системы в фоновом режиме...")
+            self.append_output("Запущено полное обновление системы в фоновом режиме...")
             self.set_process_status(True, "Полное обновление системы...")
             
             asyncio.run_coroutine_threadsafe(
@@ -262,7 +264,7 @@ class UpdateManagerWidget(QWidget):
     def reconnect_to_process(self):
         """Переподключиться к последнему активному процессу"""
         if self.current_process_id:
-            self.append_output(f"🔄 Переподключение к процессу {self.current_process_id}...")
+            self.append_output(f"Переподключение к процессу {self.current_process_id}...")
             asyncio.run_coroutine_threadsafe(
                 self.ws_server.send_command(self.client_id, f"apt:attach:{self.current_process_id}"),
                 self.ws_server.loop
@@ -277,14 +279,14 @@ class UpdateManagerWidget(QWidget):
                                         "Процесс будет остановлен, но незавершенные операции могут оставить систему в нестабильном состоянии.",
                                         QMessageBox.Yes | QMessageBox.No)
             if reply == QMessageBox.Yes:
-                self.append_output(f"⏹️ Отправка сигнала остановки процессу {self.current_process_id}...")
+                self.append_output(f"Отправка сигнала остановки процессу {self.current_process_id}...")
                 asyncio.run_coroutine_threadsafe(
                     self.ws_server.send_command(self.client_id, f"stop_detached:{self.current_process_id}"),
                     self.ws_server.loop
                 )
                 # Меняем статус, но не очищаем сразу, ждем подтверждения
                 self.stop_process_btn.setEnabled(False)
-                self.stop_process_btn.setText("⏳ Остановка...")
+                self.stop_process_btn.setText("Остановка...")
                 
                 # Таймаут на случай если процесс не ответил
                 QTimer.singleShot(10000, self._reset_stop_button)
@@ -292,7 +294,7 @@ class UpdateManagerWidget(QWidget):
     def _reset_stop_button(self):
         """Сброс кнопки остановки"""
         self.stop_process_btn.setEnabled(True)
-        self.stop_process_btn.setText("⏹️ Остановить")
+        self.stop_process_btn.setText("Остановить")
         if not self.current_process_id:
             self.set_process_status(False)
 
@@ -333,8 +335,8 @@ class UpdateManagerWidget(QWidget):
                 'command': command,
                 'start_time': data.get('timestamp', '')
             }
-            self.append_output(f"✅ Процесс запущен (ID: {process_id})")
-            self.status_label.setText(f"🔄 Выполняется: {command} (PID: {process_id[:12]}...)")
+            self.append_output(f"Процесс запущен (ID: {process_id})")
+            self.status_label.setText(f"Выполняется: {command} (PID: {process_id[:12]}...)")
 
     def handle_process_status(self, data):
         """Обработка статуса процесса"""
@@ -345,14 +347,14 @@ class UpdateManagerWidget(QWidget):
             state = status.get('status')
             
             if state == 'running':
-                self.append_output(f"✅ Процесс {process_id} выполняется (PID: {status.get('pid')})")
+                self.append_output(f"Процесс {process_id} выполняется (PID: {status.get('pid')})")
                 self.current_process_id = process_id
                 self.set_process_status(True)
             elif state == 'completed':
-                self.append_output(f"✅ Процесс {process_id} успешно завершен")
+                self.append_output(f"Процесс {process_id} успешно завершен")
                 self.set_process_status(False)
             elif state == 'not_found':
-                self.append_output(f"⚠️ Процесс {process_id} не найден")
+                self.append_output(f"Процесс {process_id} не найден")
                 self.set_process_status(False)
 
     def handle_processes_list(self, data):
@@ -360,13 +362,38 @@ class UpdateManagerWidget(QWidget):
         if isinstance(data, dict) and 'apt_processes' in data:
             processes = data['apt_processes']
             count = data.get('count', 0)
-            
+            self.active_processes = processes
+
             if count > 0:
-                self.append_output(f"\n📋 Найдено активных процессов: {count}")
+                self.append_output(f"\nНайдено активных процессов: {count}")
+                active_process = None
                 for pid, info in processes.items():
-                    self.append_output(f"  • {pid}: {info.get('status')} - {info.get('command', '')[:80]}")
+                    status = info.get('status', 'unknown')
+                    command = info.get('command', '')
+                    self.append_output(f"  • {pid}: {status} - {command}")
+                    if active_process is None and status == 'running':
+                        active_process = (pid, info)
+
+                if not active_process:
+                    active_process = next(iter(processes.items()))
+
+                process_id, process_info = active_process
+                status = process_info.get('status', 'unknown')
+                command = process_info.get('command', '')
+                self.current_process_id = process_id
+
+                if status == 'running':
+                    self.set_process_status(True, f"Выполняется {command}")
+                    self.reconnect_btn.setVisible(True)
+                else:
+                    self.process_indicator.setVisible(False)
+                    self.stop_process_btn.setVisible(False)
+                    self.reconnect_btn.setVisible(False)
+                    self.status_label.setText(f"Процесс {process_id[:12]}: {status} - {command}")
+                    self.status_label.setStyleSheet("QLabel { padding: 5px; background-color: #f3f4f6; color: #334155; }")
             else:
-                self.append_output("📋 Активных apt процессов не найдено")
+                self.append_output("Активных apt процессов не найдено")
+                self.set_process_status(False)
 
     def set_process_status(self, active, message=None):
         """Установка визуального статуса процесса"""
@@ -376,10 +403,10 @@ class UpdateManagerWidget(QWidget):
         
         if active:
             if message:
-                self.status_label.setText(f"🔄 {message}")
+                self.status_label.setText(message)
             self.status_label.setStyleSheet("QLabel { padding: 5px; background-color: #fef3c7; color: #92400e; }")
         else:
-            self.status_label.setText("✅ Готов")
+            self.status_label.setText("Готов")
             self.status_label.setStyleSheet("QLabel { padding: 5px; }")
             self.current_process_id = None
 
@@ -412,7 +439,7 @@ class UpdateManagerWidget(QWidget):
         self.updates_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         
         if len(packages) > 0:
-            self.append_output(f"📦 Найдено обновлений: {len(packages)}")
+            self.append_output(f"Найдено обновлений: {len(packages)}")
 
     def append_output(self, text):
         """Добавление текста в вывод с временной меткой"""

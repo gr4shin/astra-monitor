@@ -8,6 +8,8 @@ import time
 import base64
 import asyncio
 import hashlib
+import uuid
+from datetime import datetime
 from threading import Thread, Lock
 from collections import defaultdict, deque
 
@@ -31,6 +33,7 @@ from .client_detail_tab import ClientDetailTab
 from .custom_items import SortableTreeWidgetItem
 from .icon_utils import load_icon_from_assets
 from .widgets.toast import Toast
+from .widgets.evidence_widget import EvidenceWidget
 
 
 # --- Custom Log Handler ---
@@ -1158,6 +1161,7 @@ class ServerGUI(QMainWindow):
             'file_upload_result': self._handle_file_upload_result,
             'screenshot': self._handle_screenshot_update,
             'file_delete_result': self._handle_file_delete_result,
+            'evidence_report': self._handle_evidence_report,
             'command_result': self._handle_command_result,
             'command_error': self._handle_command_error,
             'prompt_update': self._handle_prompt_update,
@@ -1251,6 +1255,11 @@ class ServerGUI(QMainWindow):
         self.show_clients_action = view_menu.addAction("Показать 'Клиенты'")
         self.show_clients_action.triggered.connect(self.show_clients_tab)
         
+        self.show_evidence_action = view_menu.addAction("Показать 'Подозрительные действия'")
+        self.show_evidence_action.setCheckable(True)
+        self.show_evidence_action.setChecked(True)
+        self.show_evidence_action.toggled.connect(self.toggle_evidence_tab)
+
         self.show_log_action = view_menu.addAction("Показать 'Системный лог'")
         self.show_log_action.triggered.connect(self.show_log_tab)
         
@@ -1354,7 +1363,7 @@ class ServerGUI(QMainWindow):
         self.clients_tree = QTreeWidget()
         self.clients_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.clients_tree.setSortingEnabled(True)
-        self.clients_tree.setHeaderLabels(['IP адрес', 'Hostname', 'Примечание','Версия', 'CPU', 'RAM', 'Диск', 'Сеть (↓/↑)', 'Статус', 'ОС'])
+        self.clients_tree.setHeaderLabels(['IP адрес', 'Hostname', 'Примечание','Версия', 'CPU', 'RAM', 'Диск', 'Сеть (↓/↑)', 'Подозрительных', 'Статус', 'ОС'])
         self.clients_tree.header().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.clients_tree.itemDoubleClicked.connect(self.open_client_tab_from_double_click)
         self.clients_tree.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -1444,6 +1453,9 @@ class ServerGUI(QMainWindow):
         
         # Добавляем вкладки
         self.tabs.addTab(self.clients_list_tab, "Клиенты")
+        self.evidence_widget = EvidenceWidget()
+        self.evidence_widget.reports_changed.connect(self._refresh_client_suspicious_counts)
+        self.tabs.addTab(self.evidence_widget, "Подозрительные действия")
         self.tabs.addTab(self.log_view_tab, "Системный лог")
         self.tabs.addTab(self.tasks_tab, "Задачи")
         self._apply_tab_icons()
@@ -1452,6 +1464,11 @@ class ServerGUI(QMainWindow):
         
         # Client data storage
         self.client_data = defaultdict(dict)
+        self.evidence_reports = {}
+        settings_dir = os.path.dirname(os.path.abspath(APP_CONFIG['SETTINGS_FILE']))
+        self.evidence_storage_dir = os.path.join(settings_dir, 'evidence_reports')
+        os.makedirs(self.evidence_storage_dir, exist_ok=True)
+        self._load_evidence_reports()
 
         # Таймер для обновления скриншотов в сетке
         self.grid_refresh_timer = QTimer(self)
@@ -1866,6 +1883,11 @@ class ServerGUI(QMainWindow):
             self.ws_server.send_command(client_id, "get_settings"),
             self.ws_server.loop
         )
+        # Запрашиваем список фоновых apt-процессов, чтобы восстановить состояние после переподключения
+        asyncio.run_coroutine_threadsafe(
+            self.ws_server.send_command(client_id, "apt:list_processes"),
+            self.ws_server.loop
+        )
         
     def handle_connection_lost(self, client_id):
         hostname = self.client_data.get(client_id, {}).get('hostname', client_id)
@@ -1963,6 +1985,65 @@ class ServerGUI(QMainWindow):
         else:
             msg = f"Ошибка удаления на клиенте: {data.get('error', 'Unknown error')}"
             self._log_to_client_or_system(client_id, msg)
+
+    def _handle_evidence_report(self, client_id, data):
+        report = data.get('evidence_report', {})
+        report_id = report.get('event_id') or str(uuid.uuid4())
+        report['event_id'] = report_id
+        report['client_id'] = client_id
+        report['client_hostname'] = self.client_data.get(client_id, {}).get('hostname', client_id)
+        report['received_at'] = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+        report['status'] = report.get('status', 'delivered')
+
+        description = report.get('description', 'Получено доказательство.')
+        self._log_to_client_or_system(client_id, description)
+
+        report_dir = os.path.join(self.evidence_storage_dir, report_id)
+        os.makedirs(report_dir, exist_ok=True)
+        report['storage_path'] = report_dir
+
+        try:
+            if report.get('screenshot'):
+                screenshot_file = os.path.join(report_dir, 'screenshot.jpg')
+                with open(screenshot_file, 'wb') as f:
+                    f.write(base64.b64decode(report['screenshot']))
+                report['screenshot_path'] = screenshot_file
+            if report.get('camera_snapshot'):
+                camera_file = os.path.join(report_dir, 'camera.jpg')
+                with open(camera_file, 'wb') as f:
+                    f.write(base64.b64decode(report['camera_snapshot']))
+                report['camera_path'] = camera_file
+        except Exception as e:
+            logging.error(f"Не удалось сохранить изображение доказательства: {e}")
+
+        self.evidence_reports[report_id] = report
+        self._save_evidence_report(report_id, report)
+        self.evidence_widget.add_report(report)
+
+    def _save_evidence_report(self, report_id, report):
+        try:
+            metadata = {k: v for k, v in report.items() if k not in ('screenshot', 'camera_snapshot')}
+            file_path = os.path.join(self.evidence_storage_dir, f"{report_id}.json")
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            logging.error(f"Не удалось сохранить доказательство: {e}")
+
+    def _load_evidence_reports(self):
+        try:
+            for filename in os.listdir(self.evidence_storage_dir):
+                if not filename.endswith('.json'):
+                    continue
+                file_path = os.path.join(self.evidence_storage_dir, filename)
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    report = json.load(f)
+                report_id = report.get('event_id') or os.path.splitext(filename)[0]
+                report['event_id'] = report_id
+                self.evidence_reports[report_id] = report
+                if hasattr(self, 'evidence_widget'):
+                    self.evidence_widget.add_report(report)
+        except Exception as e:
+            logging.error(f"Не удалось загрузить сохраненные доказательства: {e}")
 
     def _handle_command_result(self, client_id, data):
         if client_id in self.client_tabs:
@@ -2286,11 +2367,11 @@ class ServerGUI(QMainWindow):
         tree_item.setText(4, f"{cpu}%")
         tree_item.setText(5, f"{mem}%")
         tree_item.setText(6, f"{round(data.get('disk_percent', 0))}%")
-        tree_item.setText(9, os_version)
-        
         recv = data.get('bytes_recv_speed', 0) / 1024
         sent = data.get('bytes_sent_speed', 0) / 1024
         tree_item.setText(7, f"{recv:.1f} / {sent:.1f} KB/s")
+        count = self._get_evidence_count_for_client(client_id)
+        tree_item.setText(8, str(count))
         
         gray_brush = QBrush(Qt.gray)
 
@@ -2299,7 +2380,7 @@ class ServerGUI(QMainWindow):
             # Сбрасываем цвет на дефолтный
             for i in range(tree_item.columnCount()):
                 tree_item.setData(i, Qt.ForegroundRole, QVariant())
-            tree_item.setForeground(8, QBrush(QColor("green")))
+            tree_item.setForeground(9, QBrush(QColor("green")))
             
             grid_item.setData(Qt.ForegroundRole, QVariant())
             # Включаем элемент
@@ -2311,6 +2392,8 @@ class ServerGUI(QMainWindow):
                 grid_info += f" {info_text}"
             if tags:
                 grid_info += f"\nТеги: {', '.join(tags)}"
+            if count > 0:
+                grid_info += f"\nПодозр.: {count}"
             grid_item.setText(f"{grid_info}\nCPU: {cpu}% | RAM: {mem}%")
             # Если иконки нет (например, после переподключения), ставим заглушку, чтобы зарезервировать место
             if grid_item.icon().isNull():
@@ -2322,7 +2405,7 @@ class ServerGUI(QMainWindow):
             for i in range(tree_item.columnCount()):
                 tree_item.setForeground(i, gray_brush)
             grid_item.setForeground(gray_brush)
-            tree_item.setForeground(8, QBrush(QColor("red")))
+            tree_item.setForeground(9, QBrush(QColor("red")))
             # Отключаем элемент, чтобы он не был интерактивным
             grid_item.setFlags(grid_item.flags() & ~Qt.ItemIsEnabled)
             tree_item.setFlags(tree_item.flags() & ~Qt.ItemIsEnabled)
@@ -2332,7 +2415,8 @@ class ServerGUI(QMainWindow):
         else:
             status_text = "Неизвестно"
 
-        tree_item.setText(8, status_text)
+        tree_item.setText(9, status_text)
+        tree_item.setText(10, os_version)
         if self.clients_tree.isSortingEnabled():
             self.clients_tree.sortItems(self.clients_tree.sortColumn(), self.clients_tree.header().sortIndicatorOrder())
 
@@ -2352,6 +2436,14 @@ class ServerGUI(QMainWindow):
     def update_clients_count(self):
         count = len([cid for cid, data in self.client_data.items() if data.get('status') == 'Connected'])
         self.clients_count_label.setText(f"Клиентов: {count}")
+
+    def _get_evidence_count_for_client(self, client_id):
+        return sum(1 for report in self.evidence_reports.values() if report.get('client_id') == client_id)
+
+    def _refresh_client_suspicious_counts(self):
+        for client_id in self.client_data.keys():
+            if client_id in self.tree_items:
+                self.update_tree_item(client_id)
 
     def filter_clients(self):
         query = (self.client_filter_input.text() or "").strip().lower()
@@ -2768,6 +2860,31 @@ class ServerGUI(QMainWindow):
         index = self.tabs.insertTab(insert_pos, self.tasks_tab, "Задачи")
         self.tabs.setCurrentIndex(index)
 
+    def show_evidence_tab(self):
+        """Показывает вкладку 'Подозрительные действия', если она закрыта."""
+        for i in range(self.tabs.count()):
+            if self.tabs.widget(i) == self.evidence_widget:
+                self.tabs.setCurrentIndex(i)
+                return
+
+        insert_pos = self.tabs.count()
+        for i in range(self.tabs.count()):
+            if self.tabs.widget(i) == self.clients_list_tab:
+                insert_pos = i + 1
+                break
+
+        index = self.tabs.insertTab(insert_pos, self.evidence_widget, "Подозрительные действия")
+        self.tabs.setCurrentIndex(index)
+
+    def toggle_evidence_tab(self, checked):
+        if checked:
+            self.show_evidence_tab()
+        else:
+            for i in range(self.tabs.count()):
+                if self.tabs.widget(i) == self.evidence_widget:
+                    self.tabs.removeTab(i)
+                    break
+
     def close_tab(self, index):
         """Закрытие вкладки."""
         widget = self.tabs.widget(index)
@@ -2777,6 +2894,8 @@ class ServerGUI(QMainWindow):
         # Вкладки клиентов имеют тип ClientDetailTab, остальные - системные
         if not isinstance(widget, ClientDetailTab):
             # Для системных вкладок - просто удаляем из QTabWidget, не удаляя сам виджет
+            if widget == self.evidence_widget:
+                self.show_evidence_action.setChecked(False)
             self.tabs.removeTab(index)
             return
 

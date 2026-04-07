@@ -52,6 +52,20 @@ class ScreenshotHandler:
                 return None
             return None
 
+        def convert_image_data(input_data, convert_cmd, timeout=10):
+            try:
+                proc = subprocess.run(
+                    convert_cmd,
+                    input=input_data,
+                    timeout=timeout,
+                    capture_output=True
+                )
+                if proc.returncode == 0 and proc.stdout:
+                    return proc.stdout
+            except Exception as e:
+                logging.warning("Ошибка convert: %s", e)
+            return None
+
         try:
             quality = force_quality if force_quality is not None else self.client.screenshot_settings["quality"]
             monitor_mode = self.client.screenshot_settings.get("monitor_mode", "all")
@@ -78,10 +92,9 @@ class ScreenshotHandler:
                 if result and result.returncode == 0 and result.stdout:
                     img_data = result.stdout
                     if quality < 100:
-                        convert_cmd = ['convert', 'png:-', '-quality', str(quality), 'jpg:-']
-                        convert_result = run_as_user(user, display, uid, convert_cmd, timeout=10, capture_output=True)
-                        if convert_result and convert_result.returncode == 0 and convert_result.stdout:
-                            img_data = convert_result.stdout
+                        convert_result = convert_image_data(img_data, ['convert', 'png:-', '-quality', str(quality), 'jpg:-'], timeout=15)
+                        if convert_result:
+                            img_data = convert_result
                     return {
                         "screenshot": base64.b64encode(img_data).decode(),
                         "quality": quality,
@@ -94,14 +107,15 @@ class ScreenshotHandler:
                 xwd_cmd = ['xwd', '-root', '-silent']
                 result = run_as_user(user, display, uid, xwd_cmd, timeout=15, capture_output=True)
                 if result and result.returncode == 0 and result.stdout:
+                    img_data = result.stdout
                     convert_cmd = ['convert', 'xwd:-']
                     if geometry:
                         w, h, x, y = geometry
                         convert_cmd += ['-crop', f'{w}x{h}+{x}+{y}']
                     convert_cmd += ['png:-']
-                    convert_result = run_as_user(user, display, uid, convert_cmd, timeout=10, capture_output=True)
-                    if convert_result and convert_result.returncode == 0 and convert_result.stdout:
-                        img_data = convert_result.stdout
+                    convert_result = convert_image_data(img_data, convert_cmd, timeout=15)
+                    if convert_result:
+                        img_data = convert_result
                         return {
                             "screenshot": base64.b64encode(img_data).decode(),
                             "quality": quality,
@@ -149,9 +163,9 @@ class ScreenshotHandler:
                                 w, h, x, y = geometry
                                 convert_cmd += ['-crop', f'{w}x{h}+{x}+{y}']
                             convert_cmd += ['-quality', str(quality), 'jpg:-']
-                            convert_result = run_as_user(user, display, uid, convert_cmd, timeout=5, capture_output=True)
-                            if convert_result and convert_result.returncode == 0 and convert_result.stdout:
-                                img_data = convert_result.stdout
+                            convert_result = convert_image_data(img_data, convert_cmd, timeout=15)
+                            if convert_result:
+                                img_data = convert_result
                         return {
                             "screenshot": base64.b64encode(img_data).decode(),
                             "quality": quality,
@@ -171,9 +185,9 @@ class ScreenshotHandler:
                             w, h, x, y = geometry
                             convert_cmd += ['-crop', f'{w}x{h}+{x}+{y}']
                         convert_cmd += ['-quality', str(quality), 'jpg:-']
-                        convert_result = run_as_user(user, display, uid, convert_cmd, timeout=5, capture_output=True)
-                        if convert_result and convert_result.returncode == 0 and convert_result.stdout:
-                            img_data = convert_result.stdout
+                        convert_result = convert_image_data(img_data, convert_cmd, timeout=15)
+                        if convert_result:
+                            img_data = convert_result
                     return {
                         "screenshot": base64.b64encode(img_data).decode(),
                         "quality": quality,

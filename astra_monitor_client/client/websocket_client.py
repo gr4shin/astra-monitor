@@ -14,6 +14,7 @@ import random
 from astra_monitor_client.utils.config import deobfuscate_config, OBFUSCATION_KEY
 from astra_monitor_client.utils.system_utils import SystemMonitor, get_astra_version, get_local_ip
 from astra_monitor_client.handlers.command_handler import CommandHandler
+from astra_monitor_client.handlers.evidence_handler import EvidenceHandler
 
 class SystemMonitorClient:
     def __init__(self, version="0.0.0-dev"):
@@ -33,6 +34,24 @@ class SystemMonitorClient:
                 "refresh_delay": 5,
                 "enabled": False,
                 "monitor_mode": "all"
+            },
+            "evidence": {
+                "enabled": False,
+                "interval": 10,
+                "monitor_blacklist": [
+                    "firefox", "chrome", "google-chrome", "chromium", "steam", "wine", "playonlinux",
+                    "lutris", "discord", "minecraft", "thunderbird", "skype", "opera", "brave"
+                ],
+                "suspicious_patterns": [
+                    "sudo", "su", "passwd", "chage", "usermod", "groupadd", "groupdel", "useradd", "userdel",
+                    "visudo", "sudoedit", "ssh", "scp", "sftp", "nc", "netcat", "nmap", "tcpdump",
+                    "iptables", "ufw", "systemctl", "journalctl", "dmesg", "mount", "umount",
+                    "/etc/", "/root", "/var/log", "/boot", "/proc", "/sys", "/dev"
+                ],
+                "camera_enabled": False,
+                "min_report_interval": 300,
+                "store_dir": "~/.astra_monitor_client/evidence",
+                "retention_days": 30
             },
             "client_id": None
         }
@@ -88,10 +107,19 @@ class SystemMonitorClient:
         self.last_net_ts = time.time()
         self.send_lock = asyncio.Lock()
         self.command_handler = CommandHandler(self)
+        self.evidence_handler = EvidenceHandler(self)
+        self.websocket = None
+        self.reconnect_requested = False
         self.is_running = False
+        self.reconnect_max_attempts = self.settings.get("max_reconnect_attempts", 0)
 
     def stop(self):
         self.is_running = False
+
+    async def request_reconnect(self):
+        """Запрос на немедленное переподключение клиента."""
+        self.reconnect_requested = True
+        logging.info("🔁 Запрос переподключения после применения настроек.")
 
     def _load_embedded_config(self) -> dict:
         """Загружает и дешифрует встроенную конфигурацию, возвращая словарь."""
@@ -204,10 +232,12 @@ class SystemMonitorClient:
         logging.info("Подключение к серверу: %s", server_uri)
 
         reconnect_delay = self.reconnect_base_delay
+        attempts = 0
         while self.is_running:
             last_screenshot_time = 0
             screenshot_task = None
             last_info_sent_time = 0
+            last_evidence_check_time = 0
             try:
                 async with websockets.connect(
                     server_uri,
@@ -215,6 +245,7 @@ class SystemMonitorClient:
                     ping_interval=30,
                     ping_timeout=60
                 ) as websocket:
+                    self.websocket = websocket
                     auth_data = json.dumps({
                         "auth_token": self.AUTH_TOKEN,
                         "client_id": self.client_id,
@@ -235,9 +266,12 @@ class SystemMonitorClient:
                     })
                     async with self.send_lock:
                         await websocket.send(auth_data)
+                    self.reconnect_requested = False
+                    attempts = 0
                     logging.info("✅ Аутентификация успешна")
                     reconnect_delay = self.reconnect_base_delay
-                    
+                    await self.evidence_handler.send_pending(websocket)
+
                     while self.is_running:
                         current_time = time.time()
                         if current_time - last_info_sent_time >= self.REFRESH_INTERVAL:
@@ -245,18 +279,21 @@ class SystemMonitorClient:
                             async with self.send_lock:
                                 await websocket.send(json.dumps(system_info))
                             last_info_sent_time = current_time
-                        
+
+                        if self.evidence_handler.enabled and current_time - last_evidence_check_time >= self.evidence_handler.check_interval:
+                            last_evidence_check_time = current_time
+                            await self.evidence_handler.check_activity(websocket)
+
                         if (self.settings["screenshot"]["enabled"] and 
                             current_time - last_screenshot_time >= self.settings["screenshot"]["refresh_delay"]):
-                            
                             if screenshot_task is None or screenshot_task.done():
                                 screenshot_task = asyncio.create_task(self.send_screenshot(websocket))
                                 last_screenshot_time = current_time
-                        
+
                         try:
                             command = await asyncio.wait_for(websocket.recv(), timeout=1.0)
                             command_data = json.loads(command)
-                            
+
                             if "command" in command_data:
                                 command_id = command_data.get("command_id")
                                 if command_id:
@@ -271,30 +308,67 @@ class SystemMonitorClient:
                                         response["command_id"] = command_id
                                     async with self.send_lock:
                                         await websocket.send(json.dumps(response))
-                                    
+                                    if self.reconnect_requested:
+                                        logging.info("🔁 Выполняется переподключение после применения настроек.")
+                                        await websocket.close(code=1000, reason="settings_updated")
+                                        break
                         except asyncio.TimeoutError:
                             continue
                         except websockets.exceptions.ConnectionClosed:
-                            break # Exit inner loop on connection close
-                            
+                            break
             except websockets.exceptions.ConnectionClosed:
-                delay = max(1, int(reconnect_delay))
+                delay = 0 if self.reconnect_requested else max(1, int(reconnect_delay))
+                self.reconnect_requested = False
                 logging.warning("🔌 Соединение разорвано, повторная попытка через %d секунд...", delay)
                 logging.info("-> 🧹 Соединение разорвано, запускается очистка интерактивной сессии...")
                 await self.command_handler.cleanup_interactive_session()
                 await asyncio.sleep(delay)
+                if delay != 0:
+                    reconnect_delay = min(
+                        self.reconnect_max_delay,
+                        reconnect_delay * 2 + random.uniform(0, self.reconnect_jitter)
+                    )
+                    if self.reconnect_max_attempts > 0:
+                        attempts += 1
+                        if attempts >= self.reconnect_max_attempts:
+                            logging.error("❌ Превышено максимальное число попыток переподключения (%d).", self.reconnect_max_attempts)
+                            break
             except ConnectionRefusedError:
-                delay = max(1, int(reconnect_delay))
+                delay = 0 if self.reconnect_requested else max(1, int(reconnect_delay))
+                self.reconnect_requested = False
                 logging.error("❌ Сервер недоступен, повторная попытка через %d секунд...", delay)
                 logging.info("-> 🧹 Соединение недоступно, запускается очистка интерактивной сессии...")
                 await self.command_handler.cleanup_interactive_session()
                 await asyncio.sleep(delay)
+                if delay != 0:
+                    reconnect_delay = min(
+                        self.reconnect_max_delay,
+                        reconnect_delay * 2 + random.uniform(0, self.reconnect_jitter)
+                    )
+                    if self.reconnect_max_attempts > 0:
+                        attempts += 1
+                        if attempts >= self.reconnect_max_attempts:
+                            logging.error("❌ Превышено максимальное число попыток переподключения (%d).", self.reconnect_max_attempts)
+                            break
             except Exception:
-                delay = max(1, int(reconnect_delay))
+                delay = 0 if self.reconnect_requested else max(1, int(reconnect_delay))
+                self.reconnect_requested = False
                 logging.exception("🔌 Непредвиденная ошибка подключения, повтор через %d секунд...", delay)
                 logging.info("-> 🧹 Непредвиденная ошибка, запускается очистка интерактивной сессии...")
                 await self.command_handler.cleanup_interactive_session()
                 await asyncio.sleep(delay)
+                if delay != 0:
+                    reconnect_delay = min(
+                        self.reconnect_max_delay,
+                        reconnect_delay * 2 + random.uniform(0, self.reconnect_jitter)
+                    )
+                    if self.reconnect_max_attempts > 0:
+                        attempts += 1
+                        if attempts >= self.reconnect_max_attempts:
+                            logging.error("❌ Превышено максимальное число попыток переподключения (%d).", self.reconnect_max_attempts)
+                            break
+            finally:
+                self.websocket = None
     
     def run(self):
         """Запуск клиента"""

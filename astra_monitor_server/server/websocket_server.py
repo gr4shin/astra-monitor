@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import base64
+import logging
 import websockets
 from PyQt5.QtCore import QObject, pyqtSignal
 import uuid
@@ -150,7 +151,8 @@ class WebSocketServer(QObject):
                             break
                 self.pending_acks.pop(command_id, None)
                 return False
-            except:
+            except Exception:
+                logging.exception("Ошибка отправки команды клиенту %s", client_id)
                 self.connection_lost.emit(client_id)
                 return False
         return False
@@ -174,8 +176,8 @@ class WebSocketServer(QObject):
             
             await self.send_command(client_id, f"upload_file_end:{hasher.hexdigest()}")
             return True
-        except Exception as e:
-            print(f"Error uploading file: {e}")
+        except Exception:
+            logging.exception("Ошибка загрузки файла на клиента %s", client_id)
             return False
             
     async def client_disconnect(self, client_id):
@@ -183,7 +185,8 @@ class WebSocketServer(QObject):
             try:
                 await self.clients[client_id].close()
                 return True
-            except:
+            except Exception:
+                logging.exception("Ошибка отключения клиента %s", client_id)
                 self.connection_lost.emit(client_id)
                 return False
         return False
