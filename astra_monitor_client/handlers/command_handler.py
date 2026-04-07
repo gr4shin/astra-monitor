@@ -13,12 +13,14 @@ from datetime import datetime
 from astra_monitor_client.utils.system_utils import get_full_system_info, get_active_graphical_session, get_active_graphical_sessions, build_dbus_env
 from astra_monitor_client.handlers.interactive_shell import InteractiveShell
 from astra_monitor_client.handlers.screenshot import ScreenshotHandler
+from astra_monitor_client.handlers.process_manager import ProcessManager
 
 class CommandHandler:
     def __init__(self, client):
         self.client = client
         self.interactive_shell = InteractiveShell(client)
         self.screenshot_handler = ScreenshotHandler(client)
+        self.process_manager = ProcessManager()
 
     async def handle_command(self, websocket, command):
         """Обработка команд от сервера"""
@@ -228,8 +230,15 @@ class CommandHandler:
                         return {"apt_command_result": f"❌ Ошибка сохранения файла {filepath}: {e}"}
 
                 elif apt_cmd == "update":
-                    asyncio.create_task(self.stream_command_output(websocket, "sudo apt-get update"))
-                    return None
+                    logging.info("-> 📦 Запуск apt update в фоновом режиме")
+                    process_id = await self.process_manager.start_process(
+                        command="sudo apt-get update 2>&1",
+                        capture_output=True,
+                        websocket=websocket,
+                        message_key="apt_command_output",
+                        result_key="apt_command_result"
+                    )
+                    return {"apt_started": True, "command": "update", "process_id": process_id}
 
                 elif apt_cmd == "list_upgradable":
                     proc = await asyncio.create_subprocess_shell("apt list --upgradable", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
@@ -261,12 +270,61 @@ class CommandHandler:
                 elif apt_cmd.startswith("upgrade_packages:"):
                     packages_str = apt_cmd.split(":", 1)[1]
                     packages = ' '.join(re.findall(r'[\w.\-:]+', packages_str))
-                    if packages: asyncio.create_task(self.stream_command_output(websocket, f"sudo apt-get install --only-upgrade -y {packages}"))
+                    if packages:
+                        logging.info("-> 📦 Запуск upgrade пакетов в фоновом режиме: %s", packages)
+                        process_id = await self.process_manager.start_process(
+                            command=f"sudo apt-get install --only-upgrade -y {packages} 2>&1",
+                            capture_output=True,
+                            websocket=websocket,
+                            message_key="apt_command_output",
+                            result_key="apt_command_result"
+                        )
+                        return {"apt_started": True, "command": "upgrade_packages", "packages": packages, "process_id": process_id}
                     return None
 
                 elif apt_cmd == "full_upgrade":
-                    asyncio.create_task(self.stream_command_output(websocket, "sudo apt update && sudo apt-get dist-upgrade"))
-                    return None
+                    logging.info("-> 📦 Запуск full_upgrade в фоновом режиме")
+                    process_id = await self.process_manager.start_process(
+                        command="sudo apt-get update 2>&1 && sudo apt-get dist-upgrade -y 2>&1",
+                        capture_output=True,
+                        websocket=websocket,
+                        message_key="apt_command_output",
+                        result_key="apt_command_result"
+                    )
+                    return {"apt_started": True, "command": "full_upgrade", "process_id": process_id}
+                
+                elif apt_cmd.startswith("attach:"):
+                    """Подключение к запущенному apt процессу"""
+                    process_id = apt_cmd.split(":", 1)[1]
+                    logging.info("-> 🔌 Подключение к apt процессу: %s", process_id)
+                    
+                    attached = await self.process_manager.attach_to_process(
+                        process_id=process_id,
+                        websocket=websocket,
+                        message_key="apt_command_output",
+                        result_key="apt_command_result"
+                    )
+                    
+                    if attached:
+                        return None
+                    else:
+                        return {"apt_command_result": f"❌ Не удалось подключиться к процессу {process_id}"}
+                
+                elif apt_cmd.startswith("status:"):
+                    """Статус apt процесса"""
+                    process_id = apt_cmd.split(":", 1)[1]
+                    status = await self.process_manager.get_process_status(process_id)
+                    return {"apt_process_status": status}
+                
+                elif apt_cmd == "list_processes":
+                    """Список всех apt процессов"""
+                    processes = await self.process_manager.list_processes()
+                    # Фильтруем только apt процессы
+                    apt_processes = {
+                        pid: info for pid, info in processes.get("processes", {}).items()
+                        if "apt" in info.get("command", "").lower()
+                    }
+                    return {"apt_processes": apt_processes, "count": len(apt_processes)}
 
             elif command.startswith("interactive:"):
                 parts = command.split(":", 2)
@@ -277,43 +335,34 @@ class CommandHandler:
             elif command.startswith("install_package:"):
                 package_path = command.split(":", 1)[1]
                 logging.info("-> 🚀 Выполнение: запуск установки пакета '%s'.", package_path)
-                update_script_path = "/tmp/monitor_update.sh"
-                script_content = f"""#!/bin/bash
-# Скрипт самоубновления для клиента мониторинга
-
-echo \"Запуск скрипта обновления...\" > /tmp/monitor_update.log
-
-sleep 3
-
-echo \"Запуск dpkg -i...\" >> /tmp/monitor_update.log
-DEBIAN_FRONTEND=noninteractive sudo dpkg -i \"{package_path}\" >> /tmp/monitor_update.log 2>&1
-
-echo \"Перезапуск службы...\" >> /tmp/monitor_update.log
-sudo systemctl restart astra-monitor.service >> /tmp/monitor_update.log 2>&1
-
-echo \"Скрипт обновления завершен.\" >> /tmp/monitor_update.log
-
-rm -f \"{package_path}\" 
-rm -- \"$0\"
-"""
+                
+                # Используем ProcessManager вместо прямого запуска
+                install_command = f"""#!/bin/bash
+            sleep 3
+            DEBIAN_FRONTEND=noninteractive sudo dpkg -i "{package_path}"
+            sudo systemctl restart astra-monitor.service
+            rm -f "{package_path}"
+            """
+                
                 try:
-                    with open(update_script_path, "w") as f:
-                        f.write(script_content)
-                    os.chmod(update_script_path, 0o755)
-
-                    if shutil.which('systemd-run'):
-                        cmd = ['systemd-run', '--scope', update_script_path]
-                    else:
-                        cmd = ['nohup', update_script_path]
-
-                    subprocess.Popen(cmd,
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                    stdin=subprocess.DEVNULL, start_new_session=True)
-
+                    process_id = await self.process_manager.start_process(
+                        command=install_command,
+                        capture_output=True,
+                        websocket=websocket,
+                        message_key="apt_command_output",
+                        result_key="apt_command_result"
+                    )
+                    
                     async with self.client.send_lock:
-                        await websocket.send(json.dumps({"install_result": "🚀 Процесс обновления запущен. Клиент перезапускается..."}))
-                    await asyncio.sleep(1)
+                        await websocket.send(json.dumps({
+                            "install_result": f"🚀 Процесс обновления запущен (ID: {process_id}). Клиент перезапускается...",
+                            "process_id": process_id
+                        }))
+                        
+                    # НЕ делаем sys.exit(0) сразу, даем время на отправку сообщения
+                    await asyncio.sleep(2)
                     sys.exit(0)
+                    
                 except Exception as e:
                     return {"install_result": f"❌ Не удалось запустить обновление: {e}"}
 
@@ -390,6 +439,67 @@ rm -- \"$0\"
                 message = command.split(":", 1)[1]
                 logging.info("-> 💬 Выполнение: отображение сообщения для пользователя.")
                 return await self.show_message(message)
+            
+            elif command.startswith("start_detached:"):
+                """Запуск команды в фоне"""
+                cmd = command.split(":", 1)[1]
+                logging.info("-> 🚀 Запуск фоновой команды: %s", cmd[:100])
+                
+                process_id = await self.process_manager.start_process(
+                    command=cmd,
+                    capture_output=True,
+                    websocket=websocket,
+                    message_key="detached_output",
+                    result_key="detached_result"
+                )
+                
+                return {"detached_started": True, "process_id": process_id}
+
+            elif command.startswith("attach_to_process:"):
+                """Подключение к фоновому процессу"""
+                process_id = command.split(":", 1)[1]
+                logging.info("-> 🔌 Подключение к процессу: %s", process_id)
+                
+                attached = await self.process_manager.attach_to_process(
+                    process_id=process_id,
+                    websocket=websocket,
+                    message_key="detached_output",
+                    result_key="detached_result"
+                )
+                
+                if attached:
+                    return None  # Вывод пойдет через стриминг
+                else:
+                    return {"detached_result": f"❌ Не удалось подключиться к процессу {process_id}"}
+
+            elif command.startswith("stop_detached:"):
+                """Остановка фонового процесса"""
+                process_id = command.split(":", 1)[1]
+                force = False
+                
+                if process_id.startswith("force:"):
+                    force = True
+                    process_id = process_id[6:]
+                    
+                logging.info("-> ⏹️ Остановка процесса: %s (force=%s)", process_id, force)
+                
+                stopped = await self.process_manager.stop_process(process_id, force=force)
+                
+                if stopped:
+                    return {"detached_result": f"✅ Процесс {process_id} остановлен"}
+                else:
+                    return {"detached_result": f"❌ Не удалось остановить процесс {process_id}"}
+
+            elif command.startswith("detached_status:"):
+                """Статус фонового процесса"""
+                process_id = command.split(":", 1)[1]
+                status = await self.process_manager.get_process_status(process_id)
+                return {"detached_status": status}
+
+            elif command == "list_detached":
+                """Список всех фоновых процессов"""
+                processes = await self.process_manager.list_processes()
+                return {"detached_list": processes}
 
             else:
                 logging.error("❓ Неизвестная команда от сервера: %s", command)

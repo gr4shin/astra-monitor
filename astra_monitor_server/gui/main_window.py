@@ -1175,7 +1175,11 @@ class ServerGUI(QMainWindow):
             'message_result': self._handle_message_result,
             'interactive_started': self._handle_interactive_started,
             'interactive_output': self._handle_interactive_output,
-            'interactive_stopped': self._handle_interactive_stopped,
+            'interactive_stopped': self._handle_interactive_stopped,                
+            'apt_started': self._handle_apt_started,              
+            'apt_process_status': self._handle_apt_process_status, 
+            'apt_processes': self._handle_apt_processes,         
+            'detached_result': self._handle_detached_result,    
         }
 
     def load_settings(self):
@@ -2943,3 +2947,32 @@ class ServerGUI(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._position_toasts()
+        
+        
+    def _handle_apt_started(self, client_id, data):
+        """Обработка запуска apt процесса"""
+        if client_id in self.client_tabs:
+            tab = self.client_tabs[client_id]
+            if hasattr(tab, 'update_manager_widget'):
+                tab.update_manager_widget.handle_apt_started(data)
+
+    def _handle_apt_process_status(self, client_id, data):
+        """Обработка статуса apt процесса"""
+        if client_id in self.client_tabs:
+            tab = self.client_tabs[client_id]
+            if hasattr(tab, 'update_manager_widget'):
+                tab.update_manager_widget.handle_process_status(data)
+
+    def _handle_apt_processes(self, client_id, data):
+        """Обработка списка apt процессов"""
+        if client_id in self.client_tabs:
+            tab = self.client_tabs[client_id]
+            if hasattr(tab, 'update_manager_widget'):
+                tab.update_manager_widget.handle_processes_list(data)
+
+    def _handle_detached_result(self, client_id, data):
+        """Обработка результата остановки процесса"""
+        if client_id in self.client_tabs:
+            tab = self.client_tabs[client_id]
+            if hasattr(tab, 'update_manager_widget'):
+                tab.update_manager_widget.handle_detached_result(data)
